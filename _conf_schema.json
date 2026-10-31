@@ -1,4 +1,4 @@
-﻿{
+{
   "enabled": {
     "description": "总开关：关掉后不再自动抓码发群（指令仍可手动用）",
     "type": "bool",
