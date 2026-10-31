@@ -233,6 +233,13 @@ https://webstatic.mihoyo.com/bbs/event/live/index.html?act_id=ea2026102616263458
 
 ## 数据源与已知限制
 
+### 插件读了什么（一句话核对）
+
+- **群消息**：只匹配消息里的直播间链接、取出 `act_id`；不保存聊天内容，不上传，不做别的分析
+- **本地文件**：只读写自己的状态文件（记「发过哪几场」「当前 act_id」），路径见配置项 `state_file`
+- **网络**：只连 `api-takumi.mihoyo.com`、`bbs-api.miyoushe.com`、`*-api.mihoyo.com` 这些官方域名，
+  用例只限查直播、查帖子、查公告；没有任何第三方上报、遥测或统计
+
 **取码**（免登录，就是米游社直播间页面自己用的那个）：
 
 ```
