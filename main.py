@@ -575,7 +575,12 @@ class MiyoLiveCodes(Star):
                 logger.info(f"[miyo_codes] 读 {game} 的版区工具列表失败：{exc}")
                 continue
             act = str((found or {}).get("act_id") or "")
-            if not act or self.state.get_act(game) == act:
+            if not act:
+                continue
+            cur = self.state.data["acts"].get(game) or {}
+            # 已经知道且来源也是 nav 就不用再写；来源是别的（比如贴链接进来的）
+            # 顺手补正，省得 /兑码状态 里一直显示旧的来源
+            if cur.get("act_id") == act and cur.get("source") == "nav":
                 continue
             self.state.set_act(game, act, "nav")
             off = float(found.get("offline_ts") or 0)
