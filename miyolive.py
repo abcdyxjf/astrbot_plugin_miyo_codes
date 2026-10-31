@@ -566,49 +566,49 @@ def fetch_notice(game: str) -> dict | None:
 # 比直播开始早 2 小时、比兑换码失效早 1 小时。也就是说它一出现，act_id 就到手了，
 # 不用等人贴链接，也不用登录 —— 这是目前唯一能自动拿到 act_id 的公开来源。
 #
-# 三家的实测状态（2026-10-31，都不在前瞻窗口期里）：
-#   星铁   —— 有这一项，act_id 直接到手，全自动跑通
-#   原神   —— 工具列表能拿到（10 项），但此刻没有这一项，符合"只在窗口期出现"
-#   绝区零 —— 工具列表 10 项，里面确实没有这一项；是没配还是另有入口，待下次前瞻确认
+# 这个接口对「谁在问」很敏感，坑在这里：
+# 同一个 game_id、同样的 types，请求头里的 x-rpc-client_type 不同，
+# 返回的就是两份完全不同的工具表。实测（2026-10-31）：
 #
-# 代码对三家一视同仁：谁返回了带 act_id 的按钮就用谁，没有就返回 None 走兜底。
+#   端          client_type   原神    星铁              绝区零
+#   网页            4         8 项    10 项（有兑换码）   7 项
+#   安卓 App        2        10 项    10 项（有兑换码）  10 项
+#   iOS App         1        10 项    10 项（有兑换码）  10 项
+#
+# 不带 client_type（或者带 0/3/5/6）时，原神直接返回空列表、绝区零退回 7 项。
+# 这就是"网页端明明看得见工具区，接口却给空"的原因 —— 不是版区没配，是没表明身份。
+#
+# 所以两家都要问：网页端那份和 App 端那份内容不一样（原神网页端有「阵容广场」
+# 「卡牌广场」，App 端有「旅行工具」「绮星盛会」「归忆星旅」），
+# 直播兑换码可能只挂在其中一份上。谁先给出来就用谁。
 
 NAV_API = "https://bbs-api.miyoushe.com/misc/wapi/getUniversalNavigators"
-NAV_PC_TYPE = 4  # 4 = PC 网页端工具（App 端是别的 type）
+NAV_PC_TYPE = 4  # 4 = 工具类导航（跟 client_type 不是一回事，别混）
 _NAV_ACT_RE = re.compile(r"act_id=([A-Za-z0-9]{6,40})")
 
-# 两份请求头，按顺序试。
-#
-# 为什么必须带 App 头：同一份数据，网页端和 App 端挂在不同的配置上。
-# 实测（2026-10-31）拿纯浏览器 UA 去请求，原神（gid=2）返回的工具列表
-# 整个是空的 —— 不是"没配直播兑换码"，是连「大地图」「观测枢」都不给，
-# 像是这个版区在网页端压根没接这套导航。换成米游社 App 的 UA 加上
-# x-rpc-client_type / x-rpc-app_version 之后，10 项工具全出来了。
-# 星铁两种头都能拿到，绝区零 App 头下还多出「攻略合集」「工具箱」几项。
-# 所以先走 App 头；万一列表为空，再用网页头补一次。
-_NAV_HEADERS = (
-    {
-        "User-Agent": "Miyoushe/2.60.0 (Linux; Android 13) Mobile",
-        "x-rpc-client_type": "2",
-        "x-rpc-app_version": "2.60.0",
-        "x-rpc-app_id": "bll8iq97cem8",
-        "Referer": "https://www.miyoushe.com/",
-        "Origin": "https://www.miyoushe.com",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    },
-    {
-        **HEADERS,
-        "Content-Type": "application/json",
-        "Referer": "https://www.miyoushe.com/",
-    },
+# 按顺序问，拿到 act_id 就停。网页端排前面：版区页面上看得见的那份就是它，
+# 出问题时对着页面排查最直观。
+_NAV_CLIENTS = (
+    ("web", "4"),
+    ("android", "2"),
 )
 
 
-def _nav_groups(gid: int, headers: dict) -> list[dict]:
-    """要一次版区工具列表，按分组返回。"""
+def _nav_groups(gid: int, client_type: str) -> list[dict]:
+    """以指定客户端身份要一次版区工具列表。"""
     body = json.dumps({"game_id": gid, "types": [NAV_PC_TYPE]}).encode()
-    req = urllib.request.Request(NAV_API, data=body, headers=headers)
+    req = urllib.request.Request(
+        NAV_API,
+        data=body,
+        headers={
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Referer": "https://www.miyoushe.com/",
+            "Origin": "https://www.miyoushe.com",
+            "x-rpc-client_type": client_type,
+        },
+        method="POST",
+    )
     with urllib.request.urlopen(req, timeout=12) as resp:
         data = json.loads(resp.read().decode("utf-8", "replace"))
     if data.get("retcode") != 0:
@@ -616,20 +616,8 @@ def _nav_groups(gid: int, headers: dict) -> list[dict]:
     return (data.get("data") or {}).get("list") or []
 
 
-def fetch_nav_act_id(game: str) -> dict | None:
-    """从版区工具列表里找「直播兑换码」，返回它带的 act_id。
-
-    按钮不在线时返回 None —— 这是常态（一年里只有几十个小时在线），不是失败。
-    接口很轻：POST 一个两字段的 JSON，返回几 KB，不需要登录也不需要签名。
-    """
-    gid = GAME_GIDS.get(game)
-    if not gid:
-        return None
-    groups: list[dict] = []
-    for headers in _NAV_HEADERS:
-        groups = _nav_groups(gid, headers)
-        if groups:
-            break
+def _scan_for_live(groups: list[dict]) -> dict | None:
+    """在一份工具表里找「直播兑换码」，返回它带的 act_id。"""
     for group in groups:
         for nav in group.get("navigators") or []:
             name = str(nav.get("name") or "")
@@ -647,6 +635,37 @@ def fetch_nav_act_id(game: str) -> dict | None:
                 "offline_ts": int(nav.get("offline_ts") or 0),
                 "web_path": path,
             }
+    return None
+
+
+def fetch_nav_act_id(game: str) -> dict | None:
+    """从版区工具列表里找「直播兑换码」，返回它带的 act_id。
+
+    按钮不在线时返回 None —— 这是常态（一年里只有几十个小时在线），不是失败。
+    接口很轻：POST 一个两字段的 JSON，返回几 KB，不需要登录也不需要签名。
+    两份工具表各问一次，任一份给了就收工；都失败才抛（让上层按退避处理）。
+    """
+    gid = GAME_GIDS.get(game)
+    if not gid:
+        return None
+    ok = 0
+    last_exc: Exception | None = None
+    for label, client_type in _NAV_CLIENTS:
+        try:
+            groups = _nav_groups(gid, client_type)
+            ok += 1
+        except Exception as exc:  # noqa: BLE001
+            # 一份问不到就试下一份，别让单个客户端的问题拖垮整轮
+            logger.info(f"[miyo_codes] {game} 的 {label} 工具列表请求失败：{exc}")
+            last_exc = exc
+            continue
+        hit = _scan_for_live(groups)
+        if hit:
+            return hit
+    # 只有每一份都请求失败才算真出错。能问到、但列表里没有那一项，
+    # 是正常状态（一年里大部分时间都没有），不该让上层当成故障退避。
+    if not ok and last_exc is not None:
+        raise last_exc
     return None
 
 
