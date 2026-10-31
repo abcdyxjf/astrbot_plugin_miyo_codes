@@ -175,8 +175,8 @@ https://webstatic.mihoyo.com/bbs/event/live/index.html?act_id=ea2026102616263458
 | `target_friends` | `[]` | 发到哪些人的私聊；对方得是机器人的好友 |
 | `games` | 三款全开 | `hkrpg` = 星铁 / `ys` = 原神 / `nap` = 绝区零 |
 | `act_overrides` | 空 | 手填场次，一行一个 `游戏=act_id` |
-| `poll_interval_sec` | `180` | 直播时段内查询间隔 |
-| `slow_poll_interval_sec` | `1800` | 其余时段查询间隔 |
+| `poll_interval_sec` | `180` | 直播时段内查询间隔（最小 60 秒，填更小按 60 执行） |
+| `slow_poll_interval_sec` | `1800` | 其余时段查询间隔（同上） |
 | `active_hours` | `17:00-23:59` | 没有预告时的兜底高频窗口（有预告就按预告走，不看钟点） |
 | `post_delay_min` | `30` | 直播结束后再等几分钟才发 |
 | `require_all_codes` | `true` | 等接口里的码全部揭晓才发 |

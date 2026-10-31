@@ -98,6 +98,11 @@ DEFAULTS = {
     "stale_hours": 48,
 }
 
+# 轮询间隔的硬下限（秒）。配置里填得比这更小也不生效，见 _poll_wait()。
+# 公开插件必须留这条：接口不是官方 API，一个人把它改成几秒，
+# 涨的是整个接口的压力，最后所有人的插件一起失效。
+MIN_POLL_SEC = 60.0
+
 CMD = "兑码"
 
 # 群里最常用的叫法。既用来识别「崩铁兑换码」这类指令，也用来拼提醒文案。
@@ -294,7 +299,7 @@ class State:
     PLUGIN_NAME,
     "miyo_codes",
     "原神 / 星穹铁道 / 绝区零 前瞻直播兑换码：官方接口取码，直播结束当天自动发群/私聊",
-    "1.7.3",
+    "1.7.4",
 )
 class MiyoLiveCodes(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -315,6 +320,8 @@ class MiyoLiveCodes(Star):
         self._locks: dict[str, asyncio.Lock] = {}
         # 「XX兑换码」指令的冷却，key = 群号|游戏，防同一个人连点刷屏
         self._ask_at: dict[str, float] = {}
+        # 轮询下限的警告只打一次，避免用户不改配置就刷满日志
+        self._poll_floor_warned: bool = False
 
         if cfg.get("enabled", True):
             coro = self._loop()
@@ -517,18 +524,45 @@ class MiyoLiveCodes(Star):
         return _in_window(str(self.cfg.get("active_hours") or ""))
 
     # ------------------------------------------------------------------ 主循环
+    def _poll_wait(self) -> float:
+        """本次循环结束后该睡多久。低于下限的配置一律按下限执行。
+
+        为什么要设下限：这个插件是公开的，接口又不是官方 API。一个人把它改成
+        5 秒，看着只是他自己在刷，实际是整个接口的压力上去了 —— 一旦官方加上
+        验证或限流，所有装了这个插件的人（包括配置正常的人）一起失效。
+        所以这里不信任配置值，兜一层底。
+        """
+        fast = self._should_poll_fast()
+        key = "poll_interval_sec" if fast else "slow_poll_interval_sec"
+        default = 180.0 if fast else 1800.0
+        raw = self.cfg.get(key)
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            # 没填 / 填了空串 / 填了乱码 → 用默认。注意不能写 `raw or default`：
+            # 那会把合法的 0 也当成"没填"，0 秒就绕过下限了
+            val = default
+        if val < MIN_POLL_SEC:
+            # 只警告一次，否则用户不改就会一直刷日志
+            if not self._poll_floor_warned:
+                self._poll_floor_warned = True
+                logger.warning(
+                    f"[miyo_codes] {key} = {val:g} 秒低于下限，已按 {MIN_POLL_SEC:g} 秒执行。"
+                    " 调太快会被官方接口限流，连带影响所有用这个插件的人。"
+                )
+            return MIN_POLL_SEC
+        return val
+
     async def _loop(self) -> None:
         await asyncio.sleep(10)  # 等平台连上，别在启动瞬间抢发
         while True:
-            wait = float(self.cfg.get("slow_poll_interval_sec") or 1800)
+            wait = self._poll_wait()
             try:
-                if self._should_poll_fast():
-                    wait = float(self.cfg.get("poll_interval_sec") or 180)
                 await self._tick()
             except Exception as exc:  # noqa: BLE001
                 logger.exception("[miyo_codes] 轮询出错")
                 self._last_error = str(exc)
-            await asyncio.sleep(max(30.0, wait))
+            await asyncio.sleep(wait)
 
     async def _tick(self) -> None:
         if not self.cfg.get("enabled", True):

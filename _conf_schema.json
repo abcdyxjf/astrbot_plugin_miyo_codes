@@ -34,12 +34,12 @@
     "default": ""
   },
   "poll_interval_sec": {
-    "description": "直播时段内多久查一次（秒）。180 = 3 分钟",
+    "description": "直播时段内多久查一次（秒）。180 = 3 分钟。最小 60，填更小不生效",
     "type": "int",
     "default": 180
   },
   "slow_poll_interval_sec": {
-    "description": "非直播时段多久查一次（秒）。1800 = 半小时",
+    "description": "非直播时段多久查一次（秒）。1800 = 半小时。最小 60，填更小不生效",
     "type": "int",
     "default": 1800
   },
