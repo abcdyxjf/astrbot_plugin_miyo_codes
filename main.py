@@ -40,6 +40,7 @@ from .miyolive import (
     build_message,
     fetch_codes,
     fetch_index,
+    fetch_nav_act_id,
     fetch_notice,
     fetch_show_meta,
     fetch_version_span,
@@ -80,6 +81,10 @@ DEFAULTS = {
     "remind_before_min": 30,
     # 前瞻当天、又没拿到 act_id 时，在群里说一句求链接
     "ask_for_link": False,
+    # 自动从米游社版区工具列表里发现 act_id。
+    # 「直播兑换码」按钮只在前瞻前后约 29 小时出现，平时查不到是正常的。
+    # 目前只有星铁版区配了这一项，另外两家会一直查不到，不影响别的路径
+    "nav_auto": True,
     # 群里有人说「崩铁兑换码」这类话时，直接把码回在当场（不广播到别的群）
     "ask_game_codes": True,
     # 允许用 /兑码 强制重发的 QQ 号。留空 = 群管理员和私聊可用，普通群成员只回状态。
@@ -266,7 +271,7 @@ class State:
     PLUGIN_NAME,
     "miyo_codes",
     "原神 / 星穹铁道 / 绝区零 前瞻直播兑换码：官方接口取码，直播结束当天自动发群/私聊",
-    "1.6.0",
+    "1.7.0",
 )
 class MiyoLiveCodes(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -505,6 +510,7 @@ class MiyoLiveCodes(Star):
     async def _tick(self) -> None:
         if not self.cfg.get("enabled", True):
             return
+        await self._refresh_nav_act()
         await self._refresh_schedule()
         await self._refresh_span()
         missing: list[str] = []
@@ -544,6 +550,42 @@ class MiyoLiveCodes(Star):
             if guess - 3 * 86400 <= now <= guess + 5 * 86400:
                 return 3600.0
         return 6 * 3600.0
+
+    async def _refresh_nav_act(self) -> None:
+        """从米游社版区工具列表里自动发现 act_id。
+
+        这是目前唯一不用人给、也不用登录的来源：官方的「直播兑换码」按钮一上线，
+        它的跳转链接里就带着 act_id。按钮只在直播前后约 29 小时存在，所以
+        平时查不到是正常的 —— 不能因为查不到就当成失败。
+
+        频率：平时 30 分钟一次（按钮比直播早 2 小时上线，余量够）；
+        临近直播时缩到 10 分钟，免得刚好错过按钮上线那一段。
+        """
+        if not self.cfg.get("nav_auto", True):
+            return
+        now = _now()
+        last = float(self.state.meta_get("nav_ts", 0) or 0)
+        interval = 600.0 if self._should_poll_fast() else 1800.0
+        if now - last < interval:
+            return
+        for game in self._games():
+            try:
+                found = await asyncio.to_thread(fetch_nav_act_id, game)
+            except Exception as exc:  # noqa: BLE001
+                logger.info(f"[miyo_codes] 读 {game} 的版区工具列表失败：{exc}")
+                continue
+            act = str((found or {}).get("act_id") or "")
+            if not act or self.state.get_act(game) == act:
+                continue
+            self.state.set_act(game, act, "nav")
+            off = float(found.get("offline_ts") or 0)
+            tail = ""
+            if off:
+                tail = f"，按钮 {time.strftime('%m-%d %H:%M', time.localtime(off))} 下线"
+            logger.info(
+                f"[miyo_codes] 从版区工具列表拿到 {GAMES.get(game)} 的 act_id：{act}{tail}"
+            )
+        self.state.meta_set("nav_ts", now)
 
     async def _refresh_schedule(self) -> None:
         """读三家官方号的最新「前瞻预告」，拿到下一场直播时间。

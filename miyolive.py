@@ -14,8 +14,11 @@
 关于 act_id
 ----------
 每一场前瞻有一个 act_id，形如 ea202610261626345889。
-没有"列出所有前瞻"的接口，所以 act_id 得从外面来：
-配置里手填、或者群里有人发了直播间链接就自动接住（见 main.py）。
+没有"列出所有前瞻"的接口，所以 act_id 只能从外面来，按优先级：
+配置手填 > 群里有人贴直播间链接 > 米游社版区工具列表里的「直播兑换码」。
+
+最后那条见 fetch_nav_act_id：按钮只在前瞻前后约 29 小时里出现，
+出现时它的跳转链接就带着 act_id。这是唯一不用人给、也不用登录的来源。
 """
 
 from __future__ import annotations
@@ -521,6 +524,67 @@ def fetch_notice(game: str) -> dict | None:
             "post_id": str(post.get("post_id") or ""),
             "notice_ts": created,
         }
+    return None
+
+
+# -------------------------------------------- 版区工具列表（act_id 自动发现）
+# 米游社 PC 网页版每个版区右侧有一排工具按钮，其中「直播兑换码」那一项只在
+# 前瞻直播前后出现，它的跳转链接里直接带 act_id：
+#
+#   .../bbs/event/live/index.html?act_id=ea202610261626345889&game_biz=hkrpg
+#
+# 实测（星铁 4.7）：按钮 10-30 18:00 上线、10-31 23:00 下线，共 29 小时，
+# 比直播开始早 2 小时、比兑换码失效早 1 小时。也就是说它一出现，act_id 就到手了，
+# 不用等人贴链接，也不用登录 —— 这是目前唯一能自动拿到 act_id 的公开来源。
+#
+# 局限：原神版区（gid=2）返回的工具列表整个是空的，绝区零（gid=8）有工具但
+# 没有这一项。所以现在只有星铁跑得通，另外两家仍靠「群里贴链接」兜底。
+
+NAV_API = "https://bbs-api.miyoushe.com/misc/wapi/getUniversalNavigators"
+NAV_PC_TYPE = 4  # 4 = PC 网页端工具（App 端是别的 type）
+_NAV_ACT_RE = re.compile(r"act_id=([A-Za-z0-9]{6,40})")
+
+
+def fetch_nav_act_id(game: str) -> dict | None:
+    """从版区工具列表里找「直播兑换码」，返回它带的 act_id。
+
+    按钮不在线时返回 None —— 这是常态（一年里只有几十个小时在线），不是失败。
+    接口很轻：POST 一个两字段的 JSON，返回几 KB，不需要登录也不需要签名。
+    """
+    gid = GAME_GIDS.get(game)
+    if not gid:
+        return None
+    body = json.dumps({"game_id": gid, "types": [NAV_PC_TYPE]}).encode()
+    req = urllib.request.Request(
+        NAV_API,
+        data=body,
+        headers={
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Referer": "https://www.miyoushe.com/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+    if data.get("retcode") != 0:
+        raise MiyoError(str(data.get("message") or data.get("retcode")))
+    for group in (data.get("data") or {}).get("list") or []:
+        for nav in group.get("navigators") or []:
+            name = str(nav.get("name") or "")
+            path = str(nav.get("web_path") or nav.get("app_path") or "")
+            # 认两种特征：名字里带「兑换码」，或者跳转目标就是直播页
+            if "兑换码" not in name and "/bbs/event/live/" not in path:
+                continue
+            hit = _NAV_ACT_RE.search(path)
+            if not hit:
+                continue
+            return {
+                "act_id": hit.group(1),
+                "name": name,
+                "online_ts": int(nav.get("online_ts") or 0),
+                "offline_ts": int(nav.get("offline_ts") or 0),
+                "web_path": path,
+            }
     return None
 
 

@@ -1,4 +1,4 @@
-{
+﻿{
   "enabled": {
     "description": "总开关：关掉后不再自动抓码发群（指令仍可手动用）",
     "type": "bool",
@@ -77,6 +77,11 @@
     "description": "知道是前瞻但没拿到 act_id 时，在群里说一句求直播间链接",
     "type": "bool",
     "default": false
+  },
+  "nav_auto": {
+    "description": "自动从米游社版区工具列表发现 act_id（直播前后约 29 小时内才有按钮）。目前只有星铁版区配了这一项",
+    "type": "bool",
+    "default": true
   },
   "ask_game_codes": {
     "description": "允许群友说「崩铁兑换码」「原神兑换码」「绝区零兑换码」直接取码（只在发问的那个群里回复，不广播到别的群）",
