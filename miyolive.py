@@ -25,14 +25,13 @@ from __future__ import annotations
 
 import html
 import json
-import logging
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-logger = logging.getLogger("astrbot_plugin_miyo_codes")
+from astrbot.api import logger
 
 API_BASE = "https://api-takumi.mihoyo.com/event/miyolive/"
 

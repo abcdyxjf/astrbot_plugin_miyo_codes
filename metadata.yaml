@@ -29,7 +29,7 @@ desc: |
 
   星铁不用管；原神和绝区零版区的「直播兑换码」按钮还没在窗口期里验证到，
   首场前瞻把直播间链接发到群里，插件会自动接住并开始盯码。
-version: 1.7.5
+version: 1.7.6
 author: abcdyxjf
 repo: https://github.com/abcdyxjf/astrbot_plugin_miyo_codes
 astrbot_version: ">=4.17.0"
