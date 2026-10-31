@@ -49,9 +49,9 @@
     "default": "17:00-23:59"
   },
   "post_delay_min": {
-    "description": "直播结束后再等几分钟才发（码常在结束前后才刷齐，太早发会缺码）。0 = 一到结束就发",
+    "description": "直播结束后再等几分钟才发（码常在结束前后才刷齐，太早发会缺码）。默认 30。0 = 一到结束就发",
     "type": "int",
-    "default": 15
+    "default": 30
   },
   "require_all_codes": {
     "description": "等接口里的码全部揭晓才发。绝区零一般只有 1 个码，所以不能写死「至少 3 个」",
@@ -77,6 +77,16 @@
     "description": "知道是前瞻但没拿到 act_id 时，在群里说一句求直播间链接",
     "type": "bool",
     "default": false
+  },
+  "ask_game_codes": {
+    "description": "允许群友说「崩铁兑换码」「原神兑换码」「绝区零兑换码」直接取码（只在发问的那个群里回复，不广播到别的群）",
+    "type": "bool",
+    "default": true
+  },
+  "admin_users": {
+    "description": "允许用 /兑码 强制重发的 QQ 号（可多个）。留空 = 群管理员和私聊可用；普通群成员只能看状态，防止有人在群里刷屏",
+    "type": "list",
+    "default": []
   },
   "stale_hours": {
     "description": "直播开始超过多少小时就不再发（防止把旧场次的码当新的发出去）",

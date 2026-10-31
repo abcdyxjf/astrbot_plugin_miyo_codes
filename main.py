@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 
 from astrbot.api import logger
@@ -67,7 +68,7 @@ DEFAULTS = {
     # 只在这个时段高频轮询，其余时间慢速
     "active_hours": "17:00-23:59",
     # 直播结束后再稳这么久才发（码通常在结束前后才齐，太早发会缺码）
-    "post_delay_min": 15,
+    "post_delay_min": 30,
     # 要等接口里的码「全部揭晓」才发。绝区零一般只发 1 个码，
     # 所以不能写死"至少 3 个"，否则绝区零永远发不出去。
     "require_all_codes": True,
@@ -79,6 +80,11 @@ DEFAULTS = {
     "remind_before_min": 30,
     # 前瞻当天、又没拿到 act_id 时，在群里说一句求链接
     "ask_for_link": False,
+    # 群里有人说「崩铁兑换码」这类话时，直接把码回在当场（不广播到别的群）
+    "ask_game_codes": True,
+    # 允许用 /兑码 强制重发的 QQ 号。留空 = 群管理员和私聊可用，普通群成员只回状态。
+    # 收着的原因：/兑码 会把三个游戏的码重新广播一遍，谁都能刷就成了刷屏器
+    "admin_users": [],
     # 状态文件路径。留空 = 落在 AstrBot 自己的 data/plugin_data/<插件名>/state.json，
     # 跟着数据目录走，换机器、换系统路径都不用改。确有需要再手填绝对路径。
     "state_file": "",
@@ -87,6 +93,27 @@ DEFAULTS = {
 }
 
 CMD = "兑码"
+
+# 群里最常用的叫法。既用来识别「崩铁兑换码」这类指令，也用来拼提醒文案。
+GAME_ALIASES = {
+    "原神": "ys",
+    "星铁": "hkrpg",
+    "崩铁": "hkrpg",
+    "星穹铁道": "hkrpg",
+    "崩坏星穹铁道": "hkrpg",
+    "绝区零": "nap",
+    "zzz": "nap",
+}
+GAME_ASK_WORD = {"hkrpg": "崩铁", "ys": "原神", "nap": "绝区零"}
+
+# 「崩铁兑换码」这类问法。装饰器和处理函数必须用同一个，否则会出现
+# 外层放进来、内层又判不过（或者反过来）的哑巴情况。
+# 前面不许有别的内容，后面允许挂「是什么 / 谢谢 / ？」这些尾巴——
+# 群里没人会一字不差地只发四个字。
+ASK_CODES_RE = (
+    r"^\s*(原神|星铁|崩铁|崩坏星穹铁道|星穹铁道|绝区零|zzz)\s*(的)?\s*兑换码"
+    r"\s*(是什么|是啥|多少|有吗|还有吗|呢|呀|啊|谢谢|谢谢啦)?\s*[?？!！。.~～]*\s*$"
+)
 
 
 def _now() -> float:
@@ -239,7 +266,7 @@ class State:
     PLUGIN_NAME,
     "miyo_codes",
     "原神 / 星穹铁道 / 绝区零 前瞻直播兑换码：官方接口取码，直播结束当天自动发群/私聊",
-    "1.5.0",
+    "1.6.0",
 )
 class MiyoLiveCodes(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -251,9 +278,15 @@ class MiyoLiveCodes(Star):
                 cfg[key] = [x.strip() for x in cfg[key].split(",") if x.strip()]
         self.cfg = cfg
         self._auto_platform: str | None = None  # 自动探测到的平台实例，探一次就记住
+        self._platform_try_at: float = 0.0  # 上次探测平台的时间，失败时按节流重试
         self.state = State(self._state_path())
         self._task: asyncio.Task | None = None
         self._last_error: str = ""
+        # 同一场次的发送必须串行：定时轮询和群里的指令可能同时进来，
+        # 不加锁两边都会读到"还没发过"，群里就会收到两条一模一样的码
+        self._locks: dict[str, asyncio.Lock] = {}
+        # 「XX兑换码」指令的冷却，key = 群号|游戏，防同一个人连点刷屏
+        self._ask_at: dict[str, float] = {}
 
         if cfg.get("enabled", True):
             coro = self._loop()
@@ -290,13 +323,24 @@ class MiyoLiveCodes(Star):
 
         别人的实例名千奇百怪（aiocqhttp / qq_main / snowluma…），
         写死一个名字的结果是「插件装得上、消息发不出去」，所以支持自动探测。
+
+        探测失败**不能缓存**：平台可能只是比插件晚连上几十秒。缓存了空串，
+        表现就是插件一切正常、日志只有一条 warning、但一条消息都发不出去，
+        非得重载才能恢复。这里改成失败后 60 秒再试。
         """
         want = str(self.cfg.get("platform_id") or "").strip()
         if want:
             return want
-        if self._auto_platform is None:
-            self._auto_platform = self._detect_platform()
-        return self._auto_platform
+        if self._auto_platform:
+            return self._auto_platform
+        now = _now()
+        if now - self._platform_try_at < 60:
+            return ""
+        self._platform_try_at = now
+        found = self._detect_platform()
+        if found:
+            self._auto_platform = found
+        return found
 
     def _detect_platform(self) -> str:
         """从已加载的平台实例里挑一个「能主动推送」的。"""
@@ -415,19 +459,33 @@ class MiyoLiveCodes(Star):
         live_at = float(sched.get("live_at") or 0)
         return bool(live_at) and live_at - 1800 <= now <= live_at + 6 * 3600
 
+    def _lock_for(self, act_id: str) -> asyncio.Lock:
+        """同一场次共用一把锁。不同场次、不同游戏互不影响。"""
+        lock = self._locks.get(act_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[act_id] = lock
+        return lock
+
     def _should_poll_fast(self) -> bool:
         """该不该高频轮询。
 
         优先看预告：直播可能在任何时段——周五周六都有过，原神春节档还放在中午 12:00。
         所以只要手里有预告，就按预告的开播时间前后拉高频率，不看钟点。
-        一条预告都没有时，才退回按 active_hours 猜。
+
+        注意这里只认「还没过完」的预告。直播结束一个月后那条记录还躺在状态里，
+        若按「有记录就算有预告」判断，active_hours 那个兜底就永远走不到，插件会
+        被一条陈年预告永久锁在慢速模式。
         """
         now = _now()
         games = self._games()
         if any(self._near_live(g, now) for g in games):
             return True
-        if any(self.state.get_schedule(g) for g in games):
-            return False
+        for g in games:
+            live_at = float(self.state.get_schedule(g).get("live_at") or 0)
+            if live_at and live_at + 6 * 3600 >= now:
+                # 预告还在未来（或刚结束不到 6 小时）：按预告走，不按钟点
+                return False
         return _in_window(str(self.cfg.get("active_hours") or ""))
 
     # ------------------------------------------------------------------ 主循环
@@ -469,23 +527,47 @@ class MiyoLiveCodes(Star):
         ):
             await self._ask_for_link(missing)
 
+    def _notice_interval(self) -> float:
+        """多久看一次预告。
+
+        平时 6 小时足够——预告帖一般提前 3~7 天发，跑不掉。
+        但临近「按版本周期推算出来的前瞻窗口」时缩到 1 小时：万一官方是当天
+        才补发预告，6 小时的间隔足以把整场直播直接错过。
+        """
+        now = _now()
+        for game in self._games():
+            span = self.state.meta_get(f"span:{game}") or {}
+            end_ts = float(span.get("end_ts") or 0)
+            if not end_ts or now >= end_ts:
+                continue
+            guess = end_ts - 12 * 86400  # 前瞻通常在上线前 8~13 天
+            if guess - 3 * 86400 <= now <= guess + 5 * 86400:
+                return 3600.0
+        return 6 * 3600.0
+
     async def _refresh_schedule(self) -> None:
-        """每 6 小时读一次三家官方号的最新「前瞻预告」，拿到下一场直播时间。
+        """读三家官方号的最新「前瞻预告」，拿到下一场直播时间。
 
         只解析「预告」帖：节目稿和回顾长图里的时间是兑换码失效时间，
         照抄会把"明晚 23:59"当成开播时间。
+
+        失败必须退避重试：以前无论成败都写时间戳，网络抖一下就是 6 小时不再看，
+        而那 6 小时很可能正好覆盖直播本身。
         """
         now = _now()
-        last = float(self.state.meta_get("schedule_ts", 0) or 0)
-        if now - last < 6 * 3600:
+        nxt = float(self.state.meta_get("schedule_next_at", 0) or 0)
+        if nxt and now < nxt:
             return
+        failed = False
         for game in self._games():
             try:
                 info = await asyncio.to_thread(fetch_notice, game)
             except Exception as exc:  # noqa: BLE001
+                failed = True
                 logger.info(f"[miyo_codes] 读 {game} 的前瞻预告失败：{exc}")
                 continue
             if not info:
+                failed = True
                 continue
             # 只留还没过期太久的（直播已经过去 3 天的预告没意义）
             if float(info.get("live_at") or 0) < now - 3 * 86400:
@@ -498,6 +580,9 @@ class MiyoLiveCodes(Star):
                 )
             self.state.set_schedule(game, info)
         self.state.meta_set("schedule_ts", now)
+        self.state.meta_set(
+            "schedule_next_at", now + (1800 if failed else self._notice_interval())
+        )
 
     async def _refresh_span(self) -> None:
         """每 6 小时对一次版本起止日期。
@@ -542,29 +627,45 @@ class MiyoLiveCodes(Star):
         self.state.meta_set("span_next_at", now + (1800 if failed else 6 * 3600))
 
     async def _maybe_remind(self, game: str) -> None:
-        """知道今晚有前瞻但还没有 act_id → 提前提醒群里把直播间链接丢进来。"""
-        before = float(self.cfg.get("remind_before_min") or 0) * 60
-        if before <= 0:
-            return
+        """知道有前瞻、但还没有 act_id → 提醒群里把直播间链接丢进来。
+
+        分两段：开播前 remind_before_min 一次；开播两小时后还没链接就再催一次。
+        很多人是直播快结束了才刷到群消息，只提前那次提醒根本覆盖不到他们。
+        """
         sched = self.state.get_schedule(game)
         live_at = float(sched.get("live_at") or 0)
         if not live_at:
             return
         now = _now()
-        if not (live_at - before <= now <= live_at + 3600):
-            return
-        key = f"remind:{game}:{sched.get('post_id') or sched.get('version')}"
-        if self.state.already_asked(key):
-            return
+        before = float(self.cfg.get("remind_before_min") or 0) * 60
+        tag = sched.get("post_id") or sched.get("version")
         clock = time.strftime("%m-%d %H:%M", time.localtime(live_at))
         weekday = "周" + "一二三四五六日"[time.localtime(live_at).tm_wday]
         ver = f"{sched.get('version')} " if sched.get("version") else ""
-        text = (
-            f"⏰ {clock}（{weekday}）是{GAMES.get(game)} {ver}前瞻直播。\n"
-            "我还没有这场直播间的链接——谁把它发到群里（就是你平时打开看直播那个页面），"
-            "我就能自动盯兑换码，直播一结束就发出来。"
-        )
-        await self._broadcast(text)
+        ask_word = GAME_ASK_WORD.get(game, "兑换")
+
+        if before > 0 and live_at - before <= now <= live_at:
+            key = f"remind:{game}:{tag}"
+            text = (
+                f"⏰ {clock}（{weekday}）是{GAMES.get(game)} {ver}前瞻直播。\n"
+                "我还没有这场直播间的链接——谁把它发到群里（就是你平时打开看直播那个页面），"
+                "我就能自动盯兑换码，直播一结束就发出来。"
+            )
+        elif live_at + 2 * 3600 <= now <= live_at + 4 * 3600:
+            key = f"remind_after:{game}:{tag}"
+            text = (
+                f"👀 {GAMES.get(game)}{ver}前瞻直播已经开始一阵了，但我还没拿到直播间地址。\n"
+                f"有人把链接发到群里，我马上取码；也可以直接说一句「{ask_word}兑换码」。"
+            )
+        else:
+            return
+        if self.state.already_asked(key):
+            return
+        sent_to = await self._broadcast(text)
+        # 没发出去就别标记「已经提醒过」：目标群还没配好时标记了，
+        # 等配置补上就再也不会提醒了
+        if not sent_to:
+            return
         self.state.mark_asked(key)
         logger.info(f"[miyo_codes] 已提醒 {game} 直播间链接（{clock}）")
 
@@ -624,73 +725,77 @@ class MiyoLiveCodes(Star):
                 )
 
         sig = _hash_codes(revealed)
-        done = self.state.sent_targets(act_id, sig)
-        all_keys = self._targets()
-        if not all_keys:
-            return "没配置发送对象（target_groups / target_friends 都是空的），先填群号或 QQ"
-        if force:
-            # 手动 /兑码：不管发没发过，重新发一遍
-            targets = all_keys
-        elif "*" in done:
-            return f"{GAMES.get(game)}：这一场已经发过了（{len(revealed)} 个码）"
-        else:
-            # 只补发给还没收到的地方——新加一个群或一个人，能自动补上当前场次
-            targets = [k for k in all_keys if k not in done]
-            if not targets:
+        # 从这里到发送结束必须串行。定时轮询和群里的指令可能同时走到这一步，
+        # 两边都读到「还没发过」就会各广播一遍——群里看到两条一模一样的码，
+        # 而且第二次还会覆盖状态文件里的记录。锁按 act_id 分，不同场次互不影响。
+        async with self._lock_for(act_id):
+            done = self.state.sent_targets(act_id, sig)
+            all_keys = self._targets()
+            if not all_keys:
+                return "没配置发送对象（target_groups / target_friends 都是空的），先填群号或 QQ"
+            if force:
+                # 手动 /兑码：不管发没发过，重新发一遍
+                targets = all_keys
+            elif "*" in done:
                 return f"{GAMES.get(game)}：这一场已经发过了（{len(revealed)} 个码）"
+            else:
+                # 只补发给还没收到的地方——新加一个群或一个人，能自动补上当前场次
+                targets = [k for k in all_keys if k not in done]
+                if not targets:
+                    return f"{GAMES.get(game)}：这一场已经发过了（{len(revealed)} 个码）"
 
-        expiry = ""
-        release = ""
-        release_ts = 0.0
-        cur_ver = ""
-        try:
-            meta = await asyncio.to_thread(fetch_show_meta, game)
-            expiry = str(meta.get("expiry") or "")
-            release = str(meta.get("release_text") or "")
-            release_ts = float(meta.get("release_ts") or 0)
-            cur_ver = str(meta.get("version") or "")
-            if release:
-                self.state.meta_set(
-                    f"release:{game}",
-                    {
-                        "version": meta.get("version") or "",
-                        "release_ts": meta.get("release_ts") or 0,
-                        "release_text": release,
-                        "src_act": act_id,
-                    },
-                )
-        except Exception:  # noqa: BLE001
             expiry = ""
+            release = ""
+            release_ts = 0.0
+            cur_ver = ""
+            try:
+                meta = await asyncio.to_thread(fetch_show_meta, game)
+                expiry = str(meta.get("expiry") or "")
+                release = str(meta.get("release_text") or "")
+                release_ts = float(meta.get("release_ts") or 0)
+                cur_ver = str(meta.get("version") or "")
+                if release:
+                    self.state.meta_set(
+                        f"release:{game}",
+                        {
+                            "version": meta.get("version") or "",
+                            "release_ts": meta.get("release_ts") or 0,
+                            "release_text": release,
+                            "src_act": act_id,
+                        },
+                    )
+            except Exception:  # noqa: BLE001
+                expiry = ""
 
-        # 这一版哪天结束：来自游戏内公告（「X.Y版本更新说明」的结束时间）。
-        # 必须跟本次直播公布的版本号对上才用，否则那是上一版的区间。
-        span = None
-        cached_span = self.state.meta_get(f"span:{game}") or {}
-        if cached_span.get("end_ts"):
-            same_ver = bool(
-                cur_ver
-                and cached_span.get("version")
-                and str(cached_span["version"]) == cur_ver
-            )
-            same_day = bool(
-                release_ts
-                and abs(float(cached_span.get("start_ts") or 0) - release_ts)
-                < 3 * 86400
-            )
-            if same_ver or same_day:
-                span = cached_span
+            # 这一版哪天结束：来自游戏内公告（「X.Y版本更新说明」的结束时间）。
+            # 必须跟本次直播公布的版本号对上才用，否则那是上一版的区间。
+            span = None
+            cached_span = self.state.meta_get(f"span:{game}") or {}
+            if cached_span.get("end_ts"):
+                same_ver = bool(
+                    cur_ver
+                    and cached_span.get("version")
+                    and str(cached_span["version"]) == cur_ver
+                )
+                same_day = bool(
+                    release_ts
+                    and abs(float(cached_span.get("start_ts") or 0) - release_ts)
+                    < 3 * 86400
+                )
+                if same_ver or same_day:
+                    span = cached_span
 
-        text = build_message(game, info, revealed, expiry, release, span)
-        sent_to = await self._broadcast(text, targets)
-        if sent_to:
-            self.state.mark_sent(act_id, game, sig, revealed, sent_to)
-        self.state.set_act(game, act_id, source or "auto")
-        where = "、".join(self._key_label(k) for k in sent_to) or "没有可用的群/私聊"
-        masked = "、".join(self._mask(k) for k in sent_to) or "没有可用的群/私聊"
-        logger.info(
-            f"[miyo_codes] {GAMES.get(game)} {info.get('title')} → 已发 {len(revealed)} 个码到 {masked}"
-        )
-        return f"{GAMES.get(game)}：已发送 {len(revealed)} 个码 → {where}"
+            text = build_message(game, info, revealed, expiry, release, span)
+            sent_to = await self._broadcast(text, targets)
+            if sent_to:
+                self.state.mark_sent(act_id, game, sig, revealed, sent_to)
+            self.state.set_act(game, act_id, source or "auto")
+            where = "、".join(self._key_label(k) for k in sent_to) or "没有可用的群/私聊"
+            masked = "、".join(self._mask(k) for k in sent_to) or "没有可用的群/私聊"
+            logger.info(
+                f"[miyo_codes] {GAMES.get(game)} {info.get('title')} → 已发 {len(revealed)} 个码到 {masked}"
+            )
+            return f"{GAMES.get(game)}：已发送 {len(revealed)} 个码 → {where}"
 
     async def _broadcast(self, text: str, targets: list[str] | None = None) -> list[str]:
         """往群/私聊发一段话。targets 是 "g:群号" / "f:QQ号"，返回发成功的那些。"""
@@ -722,8 +827,27 @@ class MiyoLiveCodes(Star):
             f"👀 今天是前瞻场次，我还没拿到{names}的直播间链接。\n"
             "谁把直播间链接发群里，我就能自动盯着兑换码，直播一结束就发出来。"
         )
-        await self._broadcast(text)
-        self.state.mark_asked(key)
+        sent_to = await self._broadcast(text)
+        if sent_to:
+            self.state.mark_asked(key)
+
+    def _can_force(self, event: AstrMessageEvent) -> bool:
+        """能不能强制重发（无参数的 /兑码）。
+
+        私聊里问的就是本人，放行；群里要求是群管理员，或者在 admin_users 名单里。
+        名单这条路必须留着：event.is_admin() 读的是适配器填的 role，
+        有的适配器（比如 SnowLuma）压根不填，只靠它群里永远没人能用。
+        """
+        try:
+            if not event.get_group_id():
+                return True
+            if event.is_admin():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        sender = str(event.get_sender_id() or "")
+        admins = {str(x).strip() for x in (self.cfg.get("admin_users") or [])}
+        return bool(sender and sender in admins)
 
     # ------------------------------------------------------------------ 指令
     @filter.command(CMD)
@@ -762,6 +886,15 @@ class MiyoLiveCodes(Star):
             )
             return
 
+        # 无参数 = 强制重发。这个动作会把三个游戏的码重新广播一遍，
+        # 群里谁都能触发就等于装了个刷屏器，所以只放给管理员和私聊。
+        if not self._can_force(event):
+            yield event.plain_result(
+                "强制重发要管理员才行。只想看状态发「/兑码 状态」；"
+                "想知道某一款的码，直接说「崩铁兑换码」「原神兑换码」就好。"
+            )
+            return
+
         lines = []
         for game in self._games():
             aid = self._act_for(game)
@@ -775,6 +908,64 @@ class MiyoLiveCodes(Star):
             except Exception as exc:  # noqa: BLE001
                 lines.append(f"{GAMES.get(game)}：出错 {exc}")
         yield event.plain_result("\n".join(lines))
+
+    @filter.regex(ASK_CODES_RE)
+    async def cmd_game_codes(self, event: AstrMessageEvent):
+        """群里说「崩铁兑换码」，就把码回在当前会话。
+
+        和 /兑码 的区别：这条**只回当前会话**，不广播到别的群——谁问就回给谁。
+        也不等"直播结束"那道门禁，因为很多人是直播快结束才想起来问，
+        那时候已经揭晓的码在游戏里就能换了，没必要让他们等到第二天。
+        """
+        if not self.cfg.get("ask_game_codes", True):
+            return
+        m = re.match(ASK_CODES_RE, str(event.message_str or ""), re.I)
+        if not m:
+            return
+        word = m.group(1)
+        game = GAME_ALIASES.get(word) or GAME_ALIASES.get(word.lower())
+        if not game:
+            return
+
+        # 同一会话同一款 60 秒只回一次：不然有人连点几次，群里就是一串重复消息
+        bucket = f"{event.get_group_id() or event.get_sender_id()}|{game}"
+        now = _now()
+        if now - float(self._ask_at.get(bucket) or 0) < 60:
+            return
+        self._ask_at[bucket] = now
+
+        act = self._act_for(game)
+        if not act:
+            yield event.plain_result(
+                f"我还没有{GAMES.get(game)}这一场的直播间地址。\n"
+                "把直播间链接发到群里（就是你打开看直播那个页面），我立刻开始盯码。"
+            )
+            return
+        try:
+            info = await asyncio.to_thread(fetch_index, act)
+            codes = await asyncio.to_thread(fetch_codes, act)
+        except MiyoError as exc:
+            yield event.plain_result(f"{GAMES.get(game)}：取码失败，{exc}")
+            return
+        if not codes:
+            yield event.plain_result(
+                f"{GAMES.get(game)}：接口里还没有码，等直播里放出来再问我"
+            )
+            return
+        revealed = [c for c in codes if c["to_get_time"] and c["to_get_time"] <= _now() + 60]
+        if not revealed:
+            yield event.plain_result(f"{GAMES.get(game)}：码还没揭晓，直播里放出来我就能取")
+            return
+
+        expiry = ""
+        release = ""
+        try:
+            meta = await asyncio.to_thread(fetch_show_meta, game)
+            expiry = str(meta.get("expiry") or "")
+            release = str(meta.get("release_text") or "")
+        except Exception:  # noqa: BLE001
+            expiry = ""
+        yield event.plain_result(build_message(game, info, revealed, expiry, release, None))
 
     def _status_text(self, masked: bool = False) -> str:
         """把当前状态排成一段话。
