@@ -141,8 +141,8 @@ def strip_tags(text: str) -> str:
     return _WS_RE.sub(" ", plain).strip()
 
 
-_ACT_IN_URL_RE = re.compile(r"act_id=([A-Za-z0-9]{6,40})", re.I)
-_ACT_BARE_RE = re.compile(r"\b(ea\d{16,22})\b", re.I)
+_ACT_IN_URL_RE = re.compile(r"act_id=([A-Za-z0-9]{6,40})", re.IGNORECASE)
+_ACT_BARE_RE = re.compile(r"\b(ea\d{16,22})\b", re.IGNORECASE)
 
 
 def parse_act_id(text: str) -> str:
@@ -154,7 +154,7 @@ def parse_act_id(text: str) -> str:
 
 
 def parse_dt(text: str) -> float:
-    """"2026-10-30 19:10:00" → 时间戳。解析不了就返回 0。"""
+    """ "2026-10-30 19:10:00" → 时间戳。解析不了就返回 0。"""
     text = (text or "").strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
         try:
@@ -175,7 +175,9 @@ def reveal_codes(codes: list[dict], info: dict, now: float | None = None) -> lis
     """
     now = time.time() if now is None else now
     if any(c.get("to_get_time") for c in codes):
-        return [c for c in codes if c.get("to_get_time") and c["to_get_time"] <= now + 60]
+        return [
+            c for c in codes if c.get("to_get_time") and c["to_get_time"] <= now + 60
+        ]
     end_ts = parse_dt(str(info.get("end") or ""))
     ended = bool(info.get("is_end")) or bool(end_ts and end_ts <= now)
     if not ended:
@@ -261,16 +263,12 @@ def _build_ts(
     那就用发帖年份补；补出来比发帖还早很多，说明跨年了，加 1 年。"""
     y = int(year) if year else time.localtime(base_ts).tm_year
     try:
-        ts = time.mktime(
-            (y, int(mo), int(dd), int(hh), int(mi), 0, 0, 0, -1)
-        )
+        ts = time.mktime((y, int(mo), int(dd), int(hh), int(mi), 0, 0, 0, -1))
     except (ValueError, OverflowError):
         return 0.0
     if not year and ts < base_ts - 86400 * 7:
         try:
-            ts = time.mktime(
-                (y + 1, int(mo), int(dd), int(hh), int(mi), 0, 0, 0, -1)
-            )
+            ts = time.mktime((y + 1, int(mo), int(dd), int(hh), int(mi), 0, 0, 0, -1))
         except (ValueError, OverflowError):
             return 0.0
     return ts
@@ -332,10 +330,7 @@ def _post_content_html(post_id: str, retries: int = 3) -> str:
     if time.time() < _throttle_until:
         raise MiyoError("米游社详情接口仍在限流冷却中，先跳过")
 
-    url = (
-        "https://bbs-api.miyoushe.com/post/wapi/getPostFull"
-        f"?post_id={post_id}&read=1"
-    )
+    url = f"https://bbs-api.miyoushe.com/post/wapi/getPostFull?post_id={post_id}&read=1"
     last: Exception | None = None
     for i in range(retries + 1):
         try:
@@ -349,7 +344,7 @@ def _post_content_html(post_id: str, retries: int = 3) -> str:
                 raise MiyoError(f"retcode={code} {data.get('message') or ''}".strip())
             post = ((data.get("data") or {}).get("post") or {}).get("post") or {}
             return str(post.get("content") or "")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             last = exc
             if "retcode=1034" in str(exc):
                 _throttle_until = time.time() + 300
@@ -376,7 +371,9 @@ def _user_posts(uid: str, size: int = 20) -> list[dict]:
     return [it.get("post") or {} for it in (data.get("data") or {}).get("list") or []]
 
 
-def _official_posts(game: str, keyword: str = "前瞻特别节目", size: int = 20) -> list[dict]:
+def _official_posts(
+    game: str, keyword: str = "前瞻特别节目", size: int = 20
+) -> list[dict]:
     """搜「前瞻特别节目」，只留这家官号的帖子，按发帖时间倒序。
 
     为什么不用 userPost：绝区零官号一天能发十条，20 条只覆盖两三天，
@@ -395,10 +392,7 @@ def _official_posts(game: str, keyword: str = "前瞻特别节目", size: int = 
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode("utf-8", "replace"))
-    posts = [
-        it.get("post") or {}
-        for it in (data.get("data") or {}).get("posts") or []
-    ]
+    posts = [it.get("post") or {} for it in (data.get("data") or {}).get("posts") or []]
     posts = [p for p in posts if str(p.get("uid") or "") == uid]
     posts.sort(key=lambda p: float(p.get("created_at") or 0), reverse=True)
     return posts
@@ -432,14 +426,19 @@ def fetch_expiry(game: str) -> str:
         if "失效" not in body:
             try:
                 body = _post_full_content(str(post.get("post_id") or ""))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[miyo] 预告帖正文读取失败，跳过该帖：{exc}")
                 continue
         else:
             body = strip_tags(body)
         m = _EXPIRY_RE.search(body)
         if m:
             ts = _build_ts(
-                m.group(1), m.group(2), m.group(3), m.group(4), m.group(5),
+                m.group(1),
+                m.group(2),
+                m.group(3),
+                m.group(4),
+                m.group(5),
                 created,
             )
             if ts:
@@ -475,7 +474,8 @@ def fetch_show_meta(game: str) -> dict:
         if "失效" not in body or "上线" not in body:
             try:
                 body = _post_full_content(str(post.get("post_id") or ""))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[miyo] 版本速览正文读取失败，跳过该帖：{exc}")
                 continue
         else:
             body = strip_tags(body)
@@ -535,12 +535,15 @@ def fetch_notice(game: str) -> dict | None:
             # 列表里的正文是一百来字的摘要，开播时间那句通常在后面，进详情页读全文
             try:
                 body = _post_full_content(str(post.get("post_id") or ""))
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[miyo] 前瞻帖正文读取失败，跳过该帖：{exc}")
                 continue
         m = _LIVE_TIME_RE.search(body)
         if not m:
             continue
-        ts = _build_ts(m.group(1), m.group(2), m.group(3), m.group(4), m.group(5), created)
+        ts = _build_ts(
+            m.group(1), m.group(2), m.group(3), m.group(4), m.group(5), created
+        )
         if not ts:
             continue
         vm = _VERSION_RE.search(subject)
@@ -658,8 +661,14 @@ def fetch_nav_survey(game: str) -> dict:
          "clients": {"网页": [工具名...], "安卓": [...]},
          "errors":  {"网页": "错误原因"}}
     """
-    out: dict = {"act_id": "", "name": "", "offline_ts": 0, "web_path": "",
-                 "clients": {}, "errors": {}}
+    out: dict = {
+        "act_id": "",
+        "name": "",
+        "offline_ts": 0,
+        "web_path": "",
+        "clients": {},
+        "errors": {},
+    }
     gid = GAME_GIDS.get(game)
     if not gid:
         return out
@@ -719,6 +728,7 @@ def fetch_nav_act_id(game: str) -> dict | None:
 # 它们历来是 42 天整，用常态值就够准。
 _SUMMARY_KW = {"hkrpg": "版本速览"}
 
+
 def supports_version_span(game: str) -> bool:
     """这家的版本周期能不能自动读。
 
@@ -728,7 +738,7 @@ def supports_version_span(game: str) -> bool:
 
 
 _MMDD_RE = re.compile(r"^(\d{1,2})\s*[/／.]\s*(\d{1,2})$")
-_IMG_SRC_RE = re.compile(r'<img[^>]+src="(https?://[^"]+)"', re.I)
+_IMG_SRC_RE = re.compile(r'<img[^>]+src="(https?://[^"]+)"', re.IGNORECASE)
 
 _ocr_engine = None
 
@@ -793,7 +803,9 @@ def _ocr_rows(raw: bytes, top_ratio: float = 0.35) -> list[tuple]:
     return rows
 
 
-def _span_from_rows(rows: list[tuple]) -> tuple[tuple[int, int], tuple[int, int]] | None:
+def _span_from_rows(
+    rows: list[tuple],
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
     """在 OCR 结果里定位「版本更新」和「版本结束」，各取正下方最近的那串 月/日。
 
     版面是这样的（日期在标签正下方，中间夹着版本更新周期的分期日期）：
@@ -896,7 +908,7 @@ def fetch_version_span(
             start_ts = float(cached["start_ts"])
 
         if start_ts and 10 * 86400 <= end_ts - start_ts <= 80 * 86400:
-            days = int(round((end_ts - start_ts) / 86400))
+            days = round((end_ts - start_ts) / 86400)
             return {
                 "version": latest["version"],
                 "start_ts": start_ts,
@@ -933,11 +945,7 @@ def fetch_version_span(
         created = float(post.get("created_at") or 0) or now
         if now - created > 120 * 86400:
             continue
-        if (
-            cached
-            and str(cached.get("post_id") or "") == pid
-            and cached.get("end_ts")
-        ):
+        if cached and str(cached.get("post_id") or "") == pid and cached.get("end_ts"):
             return dict(cached)
 
         vm = _VERSION_RE.search(subject)
@@ -956,7 +964,8 @@ def fetch_version_span(
             try:
                 raw = _fetch_bytes(url)
                 w, h = _img_size(raw)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[miyo] 版本速览配图取不到，跳过：{exc}")
                 continue
             # 头图 690×320 那种没有日期；15000px 的长海报 OCR 又慢又不准，都跳过
             if w < 500 or h < 600 or h > 4500:
@@ -968,7 +977,7 @@ def fetch_version_span(
             ocr_end = _mmdd_ts(pair[1][0], pair[1][1], created)
             if not ocr_start or not ocr_end or ocr_end <= ocr_start:
                 continue
-            days = int(round((ocr_end - ocr_start) / 86400))
+            days = round((ocr_end - ocr_start) / 86400)
             if not 10 <= days <= 80:
                 continue
             return {
@@ -1017,8 +1026,18 @@ ANN_API = {
 
 # 标题里带这些词的公告，结束时间跟版本无关（问卷、长期声明、玩家工具）
 _ANN_NOISE = (
-    "调研", "问卷", "防沉迷", "声明", "小程序", "社区", "FAQ", "工具一览",
-    "聚合页", "常见问题", "签到", "周边",
+    "调研",
+    "问卷",
+    "防沉迷",
+    "声明",
+    "小程序",
+    "社区",
+    "FAQ",
+    "工具一览",
+    "聚合页",
+    "常见问题",
+    "签到",
+    "周边",
 )
 
 

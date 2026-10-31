@@ -45,9 +45,9 @@ from .miyolive import (
     fetch_show_meta,
     fetch_version_span,
     parse_act_id,
+    parse_dt,
     reveal_codes,
     supports_version_span,
-    parse_dt,
 )
 
 PLUGIN_NAME = "astrbot_plugin_miyo_codes"
@@ -299,7 +299,7 @@ class State:
     PLUGIN_NAME,
     "miyo_codes",
     "原神 / 星穹铁道 / 绝区零 前瞻直播兑换码：官方接口取码，直播结束当天自动发群/私聊",
-    "1.7.4",
+    "1.7.5",
 )
 class MiyoLiveCodes(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -350,7 +350,9 @@ class MiyoLiveCodes(Star):
             # 拿不到数据目录（AstrBot 版本较老 / 权限不足）时退回插件自己的目录。
             # 一个路径问题不该把整个插件弄崩。
             logger.debug(f"[miyo_codes] 取插件数据目录失败，改用插件目录：{exc}")
-            base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin_data")
+            base = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "plugin_data"
+            )
         return os.path.join(base, "state.json")
 
     def _platform(self) -> str:
@@ -392,7 +394,8 @@ class MiyoLiveCodes(Star):
         for inst in insts:
             try:
                 meta = inst.meta()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[miyo_codes] 读取平台元信息失败，跳过该实例：{exc}")
                 continue
             pid = str(getattr(meta, "id", "") or "")
             if not pid:
@@ -585,8 +588,10 @@ class MiyoLiveCodes(Star):
             except Exception as exc:  # noqa: BLE001
                 self._last_error = f"{game}: {exc}"
                 logger.exception(f"[miyo_codes] {game} 检查失败")
-        if missing and self.cfg.get("ask_for_link") and _in_window(
-            str(self.cfg.get("active_hours") or "")
+        if (
+            missing
+            and self.cfg.get("ask_for_link")
+            and _in_window(str(self.cfg.get("active_hours") or ""))
         ):
             await self._ask_for_link(missing)
 
@@ -636,7 +641,9 @@ class MiyoLiveCodes(Star):
             # 只有记住扫到的工具名，下次窗口过了才能分清「还没开」和「真没有」。
             seen[game] = {
                 "ts": int(now),
-                "clients": {k: len(v) for k, v in (survey.get("clients") or {}).items()},
+                "clients": {
+                    k: len(v) for k, v in (survey.get("clients") or {}).items()
+                },
                 "names": {
                     k: list(v)[:12] for k, v in (survey.get("clients") or {}).items()
                 },
@@ -654,7 +661,9 @@ class MiyoLiveCodes(Star):
             off = float(survey.get("offline_ts") or 0)
             tail = ""
             if off:
-                tail = f"，按钮 {time.strftime('%m-%d %H:%M', time.localtime(off))} 下线"
+                tail = (
+                    f"，按钮 {time.strftime('%m-%d %H:%M', time.localtime(off))} 下线"
+                )
             logger.info(
                 f"[miyo_codes] 从版区工具列表拿到 {GAMES.get(game)} 的 act_id：{act}{tail}"
             )
@@ -799,7 +808,9 @@ class MiyoLiveCodes(Star):
         self.state.mark_asked(key)
         logger.info(f"[miyo_codes] 已提醒 {game} 直播间链接（{clock}）")
 
-    async def _check_game(self, game: str, act_id: str, source: str, force: bool = False) -> str:
+    async def _check_game(
+        self, game: str, act_id: str, source: str, force: bool = False
+    ) -> str:
         """检查一场直播，条件满足就发群。返回一句人话（给指令回显用）。"""
         info = await asyncio.to_thread(fetch_index, act_id)
         if info.get("game") and info["game"] != game:
@@ -846,8 +857,10 @@ class MiyoLiveCodes(Star):
         total = len(codes)
         # 三家的码数不一样：星铁/原神 3 个，绝区零一般就 1 个。
         # 所以门槛是"接口里有几个就等几个全部揭晓"，不能写死 3。
-        need = total if self.cfg.get("require_all_codes", True) else min(
-            int(self.cfg.get("min_codes") or 1), total
+        need = (
+            total
+            if self.cfg.get("require_all_codes", True)
+            else min(int(self.cfg.get("min_codes") or 1), total)
         )
         need = max(1, need)
 
@@ -856,9 +869,7 @@ class MiyoLiveCodes(Star):
                 # 兜底：万一某个码接口就是不揭晓（改版、下架），别一直卡着不发
                 grace = float(self.cfg.get("partial_grace_min") or 0) * 60
                 if not (grace and _now() >= ready_at + grace):
-                    return (
-                        f"{GAMES.get(game)}：只刷出 {len(revealed)}/{total} 个码，等齐再发"
-                    )
+                    return f"{GAMES.get(game)}：只刷出 {len(revealed)}/{total} 个码，等齐再发"
                 logger.info(
                     f"[miyo_codes] {GAMES.get(game)} 超过 {int(grace // 60)} 分钟仍只有 "
                     f"{len(revealed)}/{total} 个码，先发已拿到的"
@@ -888,7 +899,9 @@ class MiyoLiveCodes(Star):
                 # 只补发给还没收到的地方——新加一个群或一个人，能自动补上当前场次
                 targets = [k for k in all_keys if k not in done]
                 if not targets:
-                    return f"{GAMES.get(game)}：这一场已经发过了（{len(revealed)} 个码）"
+                    return (
+                        f"{GAMES.get(game)}：这一场已经发过了（{len(revealed)} 个码）"
+                    )
 
             expiry = ""
             release = ""
@@ -936,14 +949,18 @@ class MiyoLiveCodes(Star):
             if sent_to:
                 self.state.mark_sent(act_id, game, sig, revealed, sent_to)
             self.state.set_act(game, act_id, source or "auto")
-            where = "、".join(self._key_label(k) for k in sent_to) or "没有可用的群/私聊"
+            where = (
+                "、".join(self._key_label(k) for k in sent_to) or "没有可用的群/私聊"
+            )
             masked = "、".join(self._mask(k) for k in sent_to) or "没有可用的群/私聊"
             logger.info(
                 f"[miyo_codes] {GAMES.get(game)} {info.get('title')} → 已发 {len(revealed)} 个码到 {masked}"
             )
             return f"{GAMES.get(game)}：已发送 {len(revealed)} 个码 → {where}"
 
-    async def _broadcast(self, text: str, targets: list[str] | None = None) -> list[str]:
+    async def _broadcast(
+        self, text: str, targets: list[str] | None = None
+    ) -> list[str]:
         """往群/私聊发一段话。targets 是 "g:群号" / "f:QQ号"，返回发成功的那些。"""
         ok: list[str] = []
         for key in targets if targets is not None else self._targets():
@@ -989,8 +1006,9 @@ class MiyoLiveCodes(Star):
                 return True
             if event.is_admin():
                 return True
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # 取不到身份信息就按「不是管理员」处理，宁可不给权限
+            logger.debug(f"[miyo_codes] 判断管理员身份失败，按非管理员处理：{exc}")
         sender = str(event.get_sender_id() or "")
         admins = {str(x).strip() for x in (self.cfg.get("admin_users") or [])}
         return bool(sender and sender in admins)
@@ -1000,11 +1018,13 @@ class MiyoLiveCodes(Star):
     async def cmd_codes(self, event: AstrMessageEvent):
         """兑码 / 兑码 <直播间链接或act_id> / 兑码状态"""
         raw = str(event.message_str or "").strip()
-        arg = raw[len(CMD):].strip() if raw.startswith(CMD) else raw.strip()
+        arg = raw[len(CMD) :].strip() if raw.startswith(CMD) else raw.strip()
 
         if arg in ("状态", "status"):
             # 群聊里打码，私聊里给全号：群成员没必要知道插件往哪些 QQ 发过码
-            yield event.plain_result(self._status_text(masked=bool(event.get_group_id())))
+            yield event.plain_result(
+                self._status_text(masked=bool(event.get_group_id()))
+            )
             return
 
         act = parse_act_id(arg)
@@ -1045,10 +1065,14 @@ class MiyoLiveCodes(Star):
         for game in self._games():
             aid = self._act_for(game)
             if not aid:
-                lines.append(f"{GAMES.get(game)}：还没有 act_id（把直播间链接发群里就行）")
+                lines.append(
+                    f"{GAMES.get(game)}：还没有 act_id（把直播间链接发群里就行）"
+                )
                 continue
             try:
-                lines.append(await self._check_game(game, aid, source="cmd", force=True))
+                lines.append(
+                    await self._check_game(game, aid, source="cmd", force=True)
+                )
             except MiyoError as exc:
                 lines.append(f"{GAMES.get(game)}：{exc}")
             except Exception as exc:  # noqa: BLE001
@@ -1065,7 +1089,7 @@ class MiyoLiveCodes(Star):
         """
         if not self.cfg.get("ask_game_codes", True):
             return
-        m = re.match(ASK_CODES_RE, str(event.message_str or ""), re.I)
+        m = re.match(ASK_CODES_RE, str(event.message_str or ""), re.IGNORECASE)
         if not m:
             return
         word = m.group(1)
@@ -1100,7 +1124,9 @@ class MiyoLiveCodes(Star):
             return
         revealed = reveal_codes(codes, info, _now())
         if not revealed:
-            yield event.plain_result(f"{GAMES.get(game)}：码还没揭晓，直播里放出来我就能取")
+            yield event.plain_result(
+                f"{GAMES.get(game)}：码还没揭晓，直播里放出来我就能取"
+            )
             return
 
         expiry = ""
@@ -1111,7 +1137,9 @@ class MiyoLiveCodes(Star):
             release = str(meta.get("release_text") or "")
         except Exception:  # noqa: BLE001
             expiry = ""
-        yield event.plain_result(build_message(game, info, revealed, expiry, release, None))
+        yield event.plain_result(
+            build_message(game, info, revealed, expiry, release, None)
+        )
 
     def _status_text(self, masked: bool = False) -> str:
         """把当前状态排成一段话。
@@ -1125,7 +1153,9 @@ class MiyoLiveCodes(Star):
         now = _now()
         for game in self._games():
             aid = self._act_for(game)
-            src = "配置" if self._overrides().get(game) else ("群里接住" if aid else "—")
+            src = (
+                "配置" if self._overrides().get(game) else ("群里接住" if aid else "—")
+            )
             # 有记录就按记录的来源说，别一律写成"群里接住"——
             # 自动发现的 act_id 和人工贴链接进来的，排查时是要分开看的
             rec = (self.state.data.get("acts") or {}).get(game) or {}
@@ -1135,12 +1165,18 @@ class MiyoLiveCodes(Star):
             nav = (self.state.meta_get("nav_seen", {}) or {}).get(game) or {}
             if nav.get("ts"):
                 cnt = nav.get("clients") or {}
-                detail = " / ".join(
-                    f"{'网页' if k == 'web' else '安卓'} {v} 项" for k, v in cnt.items()
-                ) or "读不到"
+                detail = (
+                    " / ".join(
+                        f"{'网页' if k == 'web' else '安卓'} {v} 项"
+                        for k, v in cnt.items()
+                    )
+                    or "读不到"
+                )
                 when = time.strftime("%m-%d %H:%M", time.localtime(float(nav["ts"])))
                 if nav.get("act_id"):
-                    lines.append(f"   版区工具：{detail}，有「直播兑换码」（{when} 扫）")
+                    lines.append(
+                        f"   版区工具：{detail}，有「直播兑换码」（{when} 扫）"
+                    )
                 else:
                     lines.append(
                         f"   版区工具：{detail}，无「直播兑换码」"
@@ -1190,7 +1226,9 @@ class MiyoLiveCodes(Star):
                 t = time.strftime("%m-%d %H:%M", time.localtime(rec.get("ts", 0)))
                 keys = rec.get("targets")
                 if keys is None:
-                    keys = [f"g:{g}" for g in (rec.get("groups") or [])] or ["（旧记录）"]
+                    keys = [f"g:{g}" for g in (rec.get("groups") or [])] or [
+                        "（旧记录）"
+                    ]
                 where = "、".join(fmt_key(k) for k in keys)
                 lines.append(f"  {rec.get('game')} {act} @ {t} → {where}")
         if self._last_error:
@@ -1199,8 +1237,10 @@ class MiyoLiveCodes(Star):
         friends = "、".join(fmt_num(q) for q in self._friends()) or "未配置"
         lines.append(f"发到群：{groups}")
         lines.append(f"发到私聊：{friends}")
-        gate = "全部码都揭晓" if self.cfg.get("require_all_codes", True) else (
-            f"至少 {self.cfg.get('min_codes')} 个码"
+        gate = (
+            "全部码都揭晓"
+            if self.cfg.get("require_all_codes", True)
+            else (f"至少 {self.cfg.get('min_codes')} 个码")
         )
         lines.append(
             f"发码时机：直播结束 + {self.cfg.get('post_delay_min')} 分钟，且 {gate}"
@@ -1231,7 +1271,9 @@ class MiyoLiveCodes(Star):
             if self.state.get_act(game) == act:
                 return
             self.state.set_act(game, act, "link")
-            logger.info(f"[miyo_codes] 从群里接住 {game} 的 act_id={act}（{info.get('title')}）")
+            logger.info(
+                f"[miyo_codes] 从群里接住 {game} 的 act_id={act}（{info.get('title')}）"
+            )
             if self.cfg.get("enabled", True):
                 await self._check_game(game, act, source="link")
         except MiyoError as exc:
