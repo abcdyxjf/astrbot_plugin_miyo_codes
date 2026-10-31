@@ -29,7 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-logger = logging.getLogger("qq_miyo_codes")
+logger = logging.getLogger("astrbot_plugin_miyo_codes")
 
 API_BASE = "https://api-takumi.mihoyo.com/event/miyolive/"
 
@@ -820,7 +820,7 @@ ANN_API = {
     "hkrpg": (
         "https://hkrpg-api.mihoyo.com/common/hkrpg_cn/announcement/api/getAnnList"
         "?game=hkrpg&game_biz=hkrpg_cn&lang=zh-cn&bundle_id=hkrpg_cn"
-        "&platform=pc&region=prod_gf_cn&level=70&uid=101000001"
+        "&platform=pc&region=prod_gf_cn&level=70&uid=100000000"
     ),
     "ys": (
         "https://hk4e-api.mihoyo.com/common/hk4e_cn/announcement/api/getAnnList"

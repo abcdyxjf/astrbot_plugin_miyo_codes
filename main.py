@@ -386,8 +386,28 @@ class MiyoLiveCodes(Star):
 
     @staticmethod
     def _key_label(key: str) -> str:
+        if ":" not in str(key):
+            return str(key)  # "（旧记录）" 这类非标准值原样返回
         kind, _, ident = str(key).partition(":")
         return f"私聊{ident}" if kind == "f" else f"群{ident}"
+
+    @staticmethod
+    def _mask_num(ident: str) -> str:
+        ident = str(ident)
+        return ident if len(ident) <= 5 else f"{ident[:3]}***{ident[-3:]}"
+
+    @classmethod
+    def _mask(cls, key: str) -> str:
+        """日志专用的脱敏标签。
+
+        群号和 QQ 号在自己屏幕上看得见没问题，但用户把日志贴到 issue 求助是常事，
+        别人的号码不该跟着公开。所以日志一律用这个，指令回复仍用全号。
+        """
+        if ":" not in str(key):
+            return str(key)  # "（旧记录）" 这类非标准值原样返回
+        kind, _, ident = str(key).partition(":")
+        short = cls._mask_num(ident)
+        return f"私聊{short}" if kind == "f" else f"群{short}"
 
     def _near_live(self, game: str, now: float) -> bool:
         """现在是不是离这场直播很近（开播前半小时 ~ 结束后 6 小时）。"""
@@ -666,8 +686,9 @@ class MiyoLiveCodes(Star):
             self.state.mark_sent(act_id, game, sig, revealed, sent_to)
         self.state.set_act(game, act_id, source or "auto")
         where = "、".join(self._key_label(k) for k in sent_to) or "没有可用的群/私聊"
+        masked = "、".join(self._mask(k) for k in sent_to) or "没有可用的群/私聊"
         logger.info(
-            f"[miyo_codes] {GAMES.get(game)} {info.get('title')} → 已发 {len(revealed)} 个码到 {where}"
+            f"[miyo_codes] {GAMES.get(game)} {info.get('title')} → 已发 {len(revealed)} 个码到 {masked}"
         )
         return f"{GAMES.get(game)}：已发送 {len(revealed)} 个码 → {where}"
 
@@ -679,7 +700,7 @@ class MiyoLiveCodes(Star):
             if not umo:
                 # 没有平台实例就没法发，提示一次比闷头刷异常有用
                 logger.warning(
-                    f"[miyo_codes] 没有可用平台实例，跳过 {self._key_label(key)}；"
+                    f"[miyo_codes] 没有可用平台实例，跳过 {self._mask(key)}；"
                     "请先在面板连上平台，或在插件配置里填 platform_id"
                 )
                 continue
@@ -689,7 +710,7 @@ class MiyoLiveCodes(Star):
             except Exception as exc:  # noqa: BLE001
                 # 常见原因：人没加机器人好友 / 群把我踢了 / 平台还没连上。
                 # 只记日志，不重试——重试只会对着同一个错刷一晚上。
-                logger.warning(f"[miyo_codes] 发到 {self._key_label(key)} 失败：{exc}")
+                logger.warning(f"[miyo_codes] 发到 {self._mask(key)} 失败：{exc}")
         return ok
 
     async def _ask_for_link(self, missing: list[str]) -> None:
@@ -712,7 +733,8 @@ class MiyoLiveCodes(Star):
         arg = raw[len(CMD):].strip() if raw.startswith(CMD) else raw.strip()
 
         if arg in ("状态", "status"):
-            yield event.plain_result(self._status_text())
+            # 群聊里打码，私聊里给全号：群成员没必要知道插件往哪些 QQ 发过码
+            yield event.plain_result(self._status_text(masked=bool(event.get_group_id())))
             return
 
         act = parse_act_id(arg)
@@ -754,8 +776,15 @@ class MiyoLiveCodes(Star):
                 lines.append(f"{GAMES.get(game)}：出错 {exc}")
         yield event.plain_result("\n".join(lines))
 
-    def _status_text(self) -> str:
+    def _status_text(self, masked: bool = False) -> str:
+        """把当前状态排成一段话。
+
+        masked=True 时所有号码打码——这条指令能在群里执行，群里人不需要知道
+        本插件往哪些 QQ 私聊发过码。私聊里问就给他看全的。
+        """
         lines = ["【前瞻兑换码 · 状态】"]
+        fmt_key = self._mask if masked else self._key_label
+        fmt_num = self._mask_num if masked else str
         now = _now()
         for game in self._games():
             aid = self._act_for(game)
@@ -806,12 +835,12 @@ class MiyoLiveCodes(Star):
                 keys = rec.get("targets")
                 if keys is None:
                     keys = [f"g:{g}" for g in (rec.get("groups") or [])] or ["（旧记录）"]
-                where = "、".join(self._key_label(k) for k in keys)
+                where = "、".join(fmt_key(k) for k in keys)
                 lines.append(f"  {rec.get('game')} {act} @ {t} → {where}")
         if self._last_error:
             lines.append(f"最近一次报错：{self._last_error}")
-        groups = "、".join(self._groups()) or "未配置"
-        friends = "、".join(self._friends()) or "未配置"
+        groups = "、".join(fmt_num(g) for g in self._groups()) or "未配置"
+        friends = "、".join(fmt_num(q) for q in self._friends()) or "未配置"
         lines.append(f"发到群：{groups}")
         lines.append(f"发到私聊：{friends}")
         gate = "全部码都揭晓" if self.cfg.get("require_all_codes", True) else (
