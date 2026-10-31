@@ -1,5 +1,7 @@
 # 米哈游前瞻兑换码 · AstrBot 插件
 
+<img src="logo.png" width="96" alt="logo">
+
 原神 / 崩坏：星穹铁道 / 绝区零 每次版本前瞻直播都会发兑换码，通常**第二天就过期**。
 群里那几位经常是隔天才看到、才想起要换——这个插件在你睡觉的时候把码发到群里。
 
@@ -339,6 +341,8 @@ https://webstatic.mihoyo.com/bbs/event/live/index.html?act_id=ea2026102616263458
 - **本地文件**：只读写自己的状态文件（记「发过哪几场」「当前 act_id」），路径见配置项 `state_file`
 - **网络**：只连 `api-takumi.mihoyo.com`、`bbs-api.miyoushe.com`、`*-api.mihoyo.com` 这些官方域名，
   用例只限查直播、查帖子、查公告；没有任何第三方上报、遥测或统计
+- **不阻塞事件循环**：所有网络请求都是同步调用套在 `asyncio.to_thread` 里跑的，
+  单次超时 12~20 秒，卡住也只是那一轮晚点，不会把 AstrBot 的其它消息一起堵住
 
 **取码**（免登录，就是米游社直播间页面自己用的那个）：
 
