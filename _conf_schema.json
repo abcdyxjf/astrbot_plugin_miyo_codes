@@ -1,0 +1,91 @@
+{
+  "enabled": {
+    "description": "总开关：关掉后不再自动抓码发群（指令仍可手动用）",
+    "type": "bool",
+    "default": true
+  },
+  "platform_id": {
+    "description": "发消息用哪个平台实例（面板 → 平台 里的那个名字）。留空自动挑一个支持主动推送的实例；同时挂了多个平台时才需要手填",
+    "type": "string",
+    "default": ""
+  },
+  "target_groups": {
+    "description": "发到哪些群（群号，可多个）。填了才会发，留空不会往任何群发消息",
+    "type": "list",
+    "default": []
+  },
+  "target_friends": {
+    "description": "发到哪些人的私聊（QQ 号，可多个）。需要对方已经是机器人的好友",
+    "type": "list",
+    "default": []
+  },
+  "games": {
+    "description": "要盯哪几款：hkrpg=星穹铁道，ys=原神，nap=绝区零",
+    "type": "list",
+    "default": [
+      "hkrpg",
+      "ys",
+      "nap"
+    ]
+  },
+  "act_overrides": {
+    "description": "手动指定场次（可选）。一行一个，格式 hkrpg=ea202610261626345889。留空则用群里接住的链接",
+    "type": "string",
+    "default": ""
+  },
+  "poll_interval_sec": {
+    "description": "直播时段内多久查一次（秒）。180 = 3 分钟",
+    "type": "int",
+    "default": 180
+  },
+  "slow_poll_interval_sec": {
+    "description": "非直播时段多久查一次（秒）。1800 = 半小时",
+    "type": "int",
+    "default": 1800
+  },
+  "active_hours": {
+    "description": "没有预告时的高频轮询时段，如 17:00-23:59。有预告则按预告时间前后自动提速",
+    "type": "string",
+    "default": "17:00-23:59"
+  },
+  "post_delay_min": {
+    "description": "直播结束后再等几分钟才发（码常在结束前后才刷齐，太早发会缺码）。0 = 一到结束就发",
+    "type": "int",
+    "default": 15
+  },
+  "require_all_codes": {
+    "description": "等接口里的码全部揭晓才发。绝区零一般只有 1 个码，所以不能写死「至少 3 个」",
+    "type": "bool",
+    "default": true
+  },
+  "partial_grace_min": {
+    "description": "万一某个码一直不揭晓，等这么久（分钟）就先发已拿到的。0 = 一直等",
+    "type": "int",
+    "default": 60
+  },
+  "min_codes": {
+    "description": "至少要有几个码（下限，防止接口返回残缺数据就发）",
+    "type": "int",
+    "default": 1
+  },
+  "remind_before_min": {
+    "description": "直播前多久在群里提醒「把直播间链接丢进来」（0 = 不提醒）",
+    "type": "int",
+    "default": 30
+  },
+  "ask_for_link": {
+    "description": "知道是前瞻但没拿到 act_id 时，在群里说一句求直播间链接",
+    "type": "bool",
+    "default": false
+  },
+  "stale_hours": {
+    "description": "直播开始超过多少小时就不再发（防止把旧场次的码当新的发出去）",
+    "type": "int",
+    "default": 48
+  },
+  "state_file": {
+    "description": "状态文件路径（记已发过哪些场次、各游戏当前 act_id）。留空 = 自动放在 AstrBot 的 data/plugin_data/ 下，一般不用改",
+    "type": "string",
+    "default": ""
+  }
+}

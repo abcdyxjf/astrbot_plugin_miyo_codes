@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# AstrBot 运行时会往插件目录里塞这些（配置缓存、临时图片），不属于插件本体
+/data/
+/plugin_data/
+
+# 运行状态与本地备份
+state.json
+*.state.json
+*.bak
+*.bak-*
+*.bak.*
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
