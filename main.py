@@ -629,8 +629,11 @@ class MiyoLiveCodes(Star):
     async def _maybe_remind(self, game: str) -> None:
         """知道有前瞻、但还没有 act_id → 提醒群里把直播间链接丢进来。
 
-        分两段：开播前 remind_before_min 一次；开播两小时后还没链接就再催一次。
-        很多人是直播快结束了才刷到群消息，只提前那次提醒根本覆盖不到他们。
+        分三段，各覆盖一类人：
+        1. 距开播 3 天内先喊一次。预告一出来，直播间页面其实就已经存在了
+           （4.7 的 act_id 里那个日期正好就是预告帖发布日），早点喊才来得及找；
+        2. 开播前 remind_before_min 再喊一次，除非第 1 段刚喊过；
+        3. 开播两小时后还没链接就最后催一次——不少人这时候才刷到群消息。
         """
         sched = self.state.get_schedule(game)
         live_at = float(sched.get("live_at") or 0)
@@ -643,8 +646,19 @@ class MiyoLiveCodes(Star):
         weekday = "周" + "一二三四五六日"[time.localtime(live_at).tm_wday]
         ver = f"{sched.get('version')} " if sched.get("version") else ""
         ask_word = GAME_ASK_WORD.get(game, "兑换")
+        pre_key = f"preremind:{game}:{tag}"
 
-        if before > 0 and live_at - before <= now <= live_at:
+        if before > 0 and now < live_at - before and live_at - now <= 3 * 86400:
+            # 预告已出、离开播还有几小时到三天：先喊一次，别拖到最后一刻
+            key = pre_key
+            text = (
+                f"📅 {clock}（{weekday}）是{GAMES.get(game)} {ver}前瞻直播。\n"
+                "直播间页面现在就能打开了——谁把链接发到群里，我提前盯上，"
+                "直播一结束就把兑换码发出来。"
+            )
+        elif before > 0 and live_at - before <= now <= live_at:
+            if self.state.already_asked(pre_key):
+                return  # 提前那次已经喊过，别在半小时里连着喊两遍
             key = f"remind:{game}:{tag}"
             text = (
                 f"⏰ {clock}（{weekday}）是{GAMES.get(game)} {ver}前瞻直播。\n"
