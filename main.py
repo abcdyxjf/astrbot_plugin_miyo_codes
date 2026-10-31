@@ -40,7 +40,7 @@ from .miyolive import (
     build_message,
     fetch_codes,
     fetch_index,
-    fetch_nav_act_id,
+    fetch_nav_survey,
     fetch_notice,
     fetch_show_meta,
     fetch_version_span,
@@ -157,6 +157,15 @@ def _hash_codes(codes: list[dict]) -> str:
 # act_id 的来源，数字越大越可信。同一场次被多次写到时按这个比大小，
 # 免得自动轮询的「auto」把版区工具列表发现的「nav」盖掉。
 _SOURCE_RANK = {"nav": 4, "config": 3, "link": 2, "auto": 1, "test": 0}
+
+# /兑码状态 里给人的说法
+_SOURCE_LABEL = {
+    "nav": "版区工具自动发现",
+    "config": "配置手填",
+    "link": "群里接住",
+    "auto": "自动探测",
+    "test": "测试",
+}
 
 
 class State:
@@ -285,7 +294,7 @@ class State:
     PLUGIN_NAME,
     "miyo_codes",
     "原神 / 星穹铁道 / 绝区零 前瞻直播兑换码：官方接口取码，直播结束当天自动发群/私聊",
-    "1.7.2",
+    "1.7.3",
 )
 class MiyoLiveCodes(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -582,13 +591,24 @@ class MiyoLiveCodes(Star):
         interval = 600.0 if self._should_poll_fast() else 1800.0
         if now - last < interval:
             return
+        seen = dict(self.state.meta_get("nav_seen", {}) or {})
         for game in self._games():
             try:
-                found = await asyncio.to_thread(fetch_nav_act_id, game)
+                survey = await asyncio.to_thread(fetch_nav_survey, game)
             except Exception as exc:  # noqa: BLE001
                 logger.info(f"[miyo_codes] 读 {game} 的版区工具列表失败：{exc}")
                 continue
-            act = str((found or {}).get("act_id") or "")
+            # 把"这次到底扫到了什么"记下来：按钮只在窗口期存在，扫不到是常态，
+            # 只有记住扫到的工具名，下次窗口过了才能分清「还没开」和「真没有」。
+            seen[game] = {
+                "ts": int(now),
+                "clients": {k: len(v) for k, v in (survey.get("clients") or {}).items()},
+                "names": {
+                    k: list(v)[:12] for k, v in (survey.get("clients") or {}).items()
+                },
+                "act_id": str(survey.get("act_id") or ""),
+            }
+            act = str(survey.get("act_id") or "")
             if not act:
                 continue
             cur = self.state.data["acts"].get(game) or {}
@@ -597,13 +617,14 @@ class MiyoLiveCodes(Star):
             if cur.get("act_id") == act and cur.get("source") == "nav":
                 continue
             self.state.set_act(game, act, "nav")
-            off = float(found.get("offline_ts") or 0)
+            off = float(survey.get("offline_ts") or 0)
             tail = ""
             if off:
                 tail = f"，按钮 {time.strftime('%m-%d %H:%M', time.localtime(off))} 下线"
             logger.info(
                 f"[miyo_codes] 从版区工具列表拿到 {GAMES.get(game)} 的 act_id：{act}{tail}"
             )
+        self.state.meta_set("nav_seen", seen)
         self.state.meta_set("nav_ts", now)
 
     async def _refresh_schedule(self) -> None:
@@ -1071,7 +1092,26 @@ class MiyoLiveCodes(Star):
         for game in self._games():
             aid = self._act_for(game)
             src = "配置" if self._overrides().get(game) else ("群里接住" if aid else "—")
+            # 有记录就按记录的来源说，别一律写成"群里接住"——
+            # 自动发现的 act_id 和人工贴链接进来的，排查时是要分开看的
+            rec = (self.state.data.get("acts") or {}).get(game) or {}
+            if aid and rec.get("act_id") == aid:
+                src = _SOURCE_LABEL.get(str(rec.get("source") or ""), src)
             lines.append(f"{GAMES.get(game)}：{aid or '未设置'}（{src}）")
+            nav = (self.state.meta_get("nav_seen", {}) or {}).get(game) or {}
+            if nav.get("ts"):
+                cnt = nav.get("clients") or {}
+                detail = " / ".join(
+                    f"{'网页' if k == 'web' else '安卓'} {v} 项" for k, v in cnt.items()
+                ) or "读不到"
+                when = time.strftime("%m-%d %H:%M", time.localtime(float(nav["ts"])))
+                if nav.get("act_id"):
+                    lines.append(f"   版区工具：{detail}，有「直播兑换码」（{when} 扫）")
+                else:
+                    lines.append(
+                        f"   版区工具：{detail}，无「直播兑换码」"
+                        f"（{when} 扫，窗口外正常）"
+                    )
             sched = self.state.get_schedule(game)
             live_at = float(sched.get("live_at") or 0)
             if live_at:

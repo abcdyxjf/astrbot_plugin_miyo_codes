@@ -581,6 +581,13 @@ def fetch_notice(game: str) -> dict | None:
 # 所以两家都要问：网页端那份和 App 端那份内容不一样（原神网页端有「阵容广场」
 # 「卡牌广场」，App 端有「旅行工具」「绮星盛会」「归忆星旅」），
 # 直播兑换码可能只挂在其中一份上。谁先给出来就用谁。
+#
+# 绝区零：窗口外扫到的都是普通工具（签到福利/企业微信/养成指南/战绩/米游铺/
+# 情报站/绳网月报，App 端另有攻略合集、支付中心、工具箱），没有这一项。
+# 但**这不构成"没有"的证据** —— 3.3 前瞻是 10-09、码 10-11 失效，扫的时候
+# 早过了窗口；而星铁同样在窗口外也扫不到。所以绝区零现在只能算"未验证"，
+# 等 3.4 前瞻（约 12 月）那 29 小时里再看一眼才算数。fetch_nav_survey() 会把
+# 每次扫到的工具名带回来，就是为了到时候能拿事实判断，而不是靠推断。
 
 NAV_API = "https://bbs-api.miyoushe.com/misc/wapi/getUniversalNavigators"
 NAV_PC_TYPE = 4  # 4 = 工具类导航（跟 client_type 不是一回事，别混）
@@ -638,35 +645,64 @@ def _scan_for_live(groups: list[dict]) -> dict | None:
     return None
 
 
+def fetch_nav_survey(game: str) -> dict:
+    """把版区工具列表整个问一遍，返回「有没有兑换码按钮」+「都扫到了哪些工具」。
+
+    为什么要连工具名一起带回来：这个按钮只在直播窗口里存在（星铁 4.7 实测是
+    29 小时），窗口外查不到是正常的。只看拿没拿到 act_id，就分不清
+    「窗口还没开」和「这家压根没配这一项」——结论只能靠猜。
+    带上工具名之后，下一次窗口期一过就能用事实说话（有 / 没有）。
+
+    返回：
+        {"act_id": str, "name": str, "offline_ts": int, "web_path": str,
+         "clients": {"网页": [工具名...], "安卓": [...]},
+         "errors":  {"网页": "错误原因"}}
+    """
+    out: dict = {"act_id": "", "name": "", "offline_ts": 0, "web_path": "",
+                 "clients": {}, "errors": {}}
+    gid = GAME_GIDS.get(game)
+    if not gid:
+        return out
+    for label, client_type in _NAV_CLIENTS:
+        try:
+            groups = _nav_groups(gid, client_type)
+        except Exception as exc:  # noqa: BLE001
+            # 一份问不到就试下一份，别让单个客户端的问题拖垮整轮
+            out["errors"][label] = str(exc)
+            logger.info(f"[miyo_codes] {game} 的 {label} 工具列表请求失败：{exc}")
+            continue
+        names = [
+            str(nav.get("name") or "")
+            for group in groups
+            for nav in group.get("navigators") or []
+        ]
+        out["clients"][label] = names
+        hit = _scan_for_live(groups)
+        if hit and not out["act_id"]:
+            out.update(hit)
+    # 只有每一份都请求失败才算真出错。能问到、但列表里没有那一项，
+    # 是正常状态（一年里大部分时间都没有），不该让上层当成故障退避。
+    if not out["clients"] and out["errors"]:
+        raise MiyoError(next(iter(out["errors"].values())))
+    return out
+
+
 def fetch_nav_act_id(game: str) -> dict | None:
     """从版区工具列表里找「直播兑换码」，返回它带的 act_id。
 
     按钮不在线时返回 None —— 这是常态（一年里只有几十个小时在线），不是失败。
     接口很轻：POST 一个两字段的 JSON，返回几 KB，不需要登录也不需要签名。
-    两份工具表各问一次，任一份给了就收工；都失败才抛（让上层按退避处理）。
     """
-    gid = GAME_GIDS.get(game)
-    if not gid:
+    survey = fetch_nav_survey(game)
+    if not survey.get("act_id"):
         return None
-    ok = 0
-    last_exc: Exception | None = None
-    for label, client_type in _NAV_CLIENTS:
-        try:
-            groups = _nav_groups(gid, client_type)
-            ok += 1
-        except Exception as exc:  # noqa: BLE001
-            # 一份问不到就试下一份，别让单个客户端的问题拖垮整轮
-            logger.info(f"[miyo_codes] {game} 的 {label} 工具列表请求失败：{exc}")
-            last_exc = exc
-            continue
-        hit = _scan_for_live(groups)
-        if hit:
-            return hit
-    # 只有每一份都请求失败才算真出错。能问到、但列表里没有那一项，
-    # 是正常状态（一年里大部分时间都没有），不该让上层当成故障退避。
-    if not ok and last_exc is not None:
-        raise last_exc
-    return None
+    return {
+        "act_id": survey["act_id"],
+        "name": survey.get("name", ""),
+        "online_ts": int(survey.get("online_ts") or 0),
+        "offline_ts": int(survey.get("offline_ts") or 0),
+        "web_path": survey.get("web_path", ""),
+    }
 
 
 # ---------------------------------------------------------------- 版本周期（OCR）
