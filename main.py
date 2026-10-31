@@ -45,6 +45,7 @@ from .miyolive import (
     fetch_show_meta,
     fetch_version_span,
     parse_act_id,
+    reveal_codes,
     supports_version_span,
     parse_dt,
 )
@@ -153,6 +154,11 @@ def _hash_codes(codes: list[dict]) -> str:
     return hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
 
 
+# act_id 的来源，数字越大越可信。同一场次被多次写到时按这个比大小，
+# 免得自动轮询的「auto」把版区工具列表发现的「nav」盖掉。
+_SOURCE_RANK = {"nav": 4, "config": 3, "link": 2, "auto": 1, "test": 0}
+
+
 class State:
     """很薄的一层持久化：哪些场次发过了、每个游戏当前的 act_id。"""
 
@@ -190,6 +196,14 @@ class State:
         return str((self.data["acts"].get(game) or {}).get("act_id") or "")
 
     def set_act(self, game: str, act_id: str, source: str) -> None:
+        cur = self.data["acts"].get(game) or {}
+        if cur.get("act_id") == act_id:
+            # 同一场次只升不降。版区工具列表自动发现的（nav）是硬证据，
+            # 但发送成功后还会走一次 set_act(source="auto")，不拦就会把
+            # 「nav」改写成「auto」，状态里看着像配置里手工填的。
+            old = str(cur.get("source") or "")
+            if _SOURCE_RANK.get(old, 0) > _SOURCE_RANK.get(source, 0):
+                source = old
         self.data["acts"][game] = {
             "act_id": act_id,
             "source": source,
@@ -271,7 +285,7 @@ class State:
     PLUGIN_NAME,
     "miyo_codes",
     "原神 / 星穹铁道 / 绝区零 前瞻直播兑换码：官方接口取码，直播结束当天自动发群/私聊",
-    "1.7.0",
+    "1.7.1",
 )
 class MiyoLiveCodes(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -738,16 +752,32 @@ class MiyoLiveCodes(Star):
                 f"act_id 属于 {info['game']}，不是 {GAMES.get(game)}（配置串场了？）"
             )
 
-        started = parse_dt(info.get("start", ""))
-        if started and _now() - started > float(self.cfg.get("stale_hours") or 48) * 3600:
-            return f"{GAMES.get(game)}：这场直播是 {info.get('start')} 的，已经不是当天，跳过"
-
         codes = await asyncio.to_thread(fetch_codes, act_id)
         if not codes:
             return f"{GAMES.get(game)}：接口里还没有码"
 
+        # 这场是不是早就结束了。
+        # 以前这里是 `if started and ...`，start 一旦格式变了就等于没检查——
+        # 插件重启丢了状态文件之后，会把几天前那场的过期码重新发进群。
+        stale_limit = float(self.cfg.get("stale_hours") or 48) * 3600
+        started = parse_dt(info.get("start", ""))
+        if not started:
+            # start 读不出来，拿码的揭晓时间当替补（它通常就是直播当天）
+            started = max(
+                (c["to_get_time"] for c in codes if c.get("to_get_time")), default=0.0
+            )
+        if started and _now() - started > stale_limit:
+            return f"{GAMES.get(game)}：这场直播是 {info.get('start') or '更早'} 的，已经过期，跳过"
+        if not started and not force:
+            # 开始时间和揭晓时间都读不出来，就没法判断这场是新的还是旧的。
+            # 自动轮询宁可跳过（大不了手动 /兑码 再发），也不能往群里灌过期码。
+            logger.warning(
+                f"[miyo_codes] {GAMES.get(game)} {act_id} 拿不到任何时间字段，跳过自动发送"
+            )
+            return f"{GAMES.get(game)}：这场的时间读不出来，自动跳过（可以用 /兑码 手动发）"
+
         # 只发已经在直播里揭晓的码，且要等直播结束——避免发半截
-        revealed = [c for c in codes if c["to_get_time"] and c["to_get_time"] <= _now() + 60]
+        revealed = reveal_codes(codes, info, _now())
         if not revealed:
             return f"{GAMES.get(game)}：码还没揭晓"
 
@@ -755,7 +785,7 @@ class MiyoLiveCodes(Star):
         # 为什么不能一到点就发：直播常常超时，最后那个码常常是在结束前后才刷出来；
         # 提前发出去就是一个少一个码的残缺消息，群里还得再补一次。
         end_ts = parse_dt(str(info.get("end") or ""))
-        last_reveal = max(c["to_get_time"] for c in revealed)
+        last_reveal = max((c["to_get_time"] for c in revealed), default=0.0)
         delay = float(self.cfg.get("post_delay_min") or 0) * 60
         ready_at = max(end_ts, last_reveal) + delay
         total = len(codes)
@@ -1013,7 +1043,7 @@ class MiyoLiveCodes(Star):
                 f"{GAMES.get(game)}：接口里还没有码，等直播里放出来再问我"
             )
             return
-        revealed = [c for c in codes if c["to_get_time"] and c["to_get_time"] <= _now() + 60]
+        revealed = reveal_codes(codes, info, _now())
         if not revealed:
             yield event.plain_result(f"{GAMES.get(game)}：码还没揭晓，直播里放出来我就能取")
             return

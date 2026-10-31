@@ -115,11 +115,17 @@ def fetch_codes(act_id: str) -> list[dict]:
         code = str(item.get("code") or "").strip()
         if not code:
             continue
+        # 接口平时给的是数字，但不保证哪天变成字符串或干脆缺字段——
+        # 这里一旦抛异常，整场都取不出来，所以单独兜一下。
+        try:
+            to_get = int(item.get("to_get_time") or 0)
+        except (TypeError, ValueError):
+            to_get = 0
         out.append(
             {
                 "code": code,
                 "reward": strip_tags(str(item.get("title") or "")),
-                "to_get_time": int(item.get("to_get_time") or 0),
+                "to_get_time": to_get,
             }
         )
     return out
@@ -156,6 +162,29 @@ def parse_dt(text: str) -> float:
         except ValueError:
             continue
     return 0.0
+
+
+def reveal_codes(codes: list[dict], info: dict, now: float | None = None) -> list[dict]:
+    """这几个码现在能不能发。
+
+    正常路径：to_get_time 到了就算揭晓（直播里念过一遍，公开了）。
+    失效路径：接口哪天不再带 to_get_time（全 0），那么"按揭晓时间过滤"会让
+    revealed 永远是空的 —— 插件从此一声不响，而且不报错。这是最糟的失效方式：
+    静默。所以退一步，改用「直播是否已经结束」来放行：结束了就认为码都念完了，
+    没结束仍然不发（别把还没念的码提前漏出去）。
+    """
+    now = time.time() if now is None else now
+    if any(c.get("to_get_time") for c in codes):
+        return [c for c in codes if c.get("to_get_time") and c["to_get_time"] <= now + 60]
+    end_ts = parse_dt(str(info.get("end") or ""))
+    ended = bool(info.get("is_end")) or bool(end_ts and end_ts <= now)
+    if not ended:
+        return []
+    logger.warning(
+        "refreshCode 没给 to_get_time（接口可能改版），改按「直播已结束」放行 %d 个码",
+        len(codes),
+    )
+    return list(codes)
 
 
 def live_title_short(game: str, title: str) -> str:
@@ -537,12 +566,54 @@ def fetch_notice(game: str) -> dict | None:
 # 比直播开始早 2 小时、比兑换码失效早 1 小时。也就是说它一出现，act_id 就到手了，
 # 不用等人贴链接，也不用登录 —— 这是目前唯一能自动拿到 act_id 的公开来源。
 #
-# 局限：原神版区（gid=2）返回的工具列表整个是空的，绝区零（gid=8）有工具但
-# 没有这一项。所以现在只有星铁跑得通，另外两家仍靠「群里贴链接」兜底。
+# 三家的实测状态（2026-10-31，都不在前瞻窗口期里）：
+#   星铁   —— 有这一项，act_id 直接到手，全自动跑通
+#   原神   —— 工具列表能拿到（10 项），但此刻没有这一项，符合"只在窗口期出现"
+#   绝区零 —— 工具列表 10 项，里面确实没有这一项；是没配还是另有入口，待下次前瞻确认
+#
+# 代码对三家一视同仁：谁返回了带 act_id 的按钮就用谁，没有就返回 None 走兜底。
 
 NAV_API = "https://bbs-api.miyoushe.com/misc/wapi/getUniversalNavigators"
 NAV_PC_TYPE = 4  # 4 = PC 网页端工具（App 端是别的 type）
 _NAV_ACT_RE = re.compile(r"act_id=([A-Za-z0-9]{6,40})")
+
+# 两份请求头，按顺序试。
+#
+# 为什么必须带 App 头：同一份数据，网页端和 App 端挂在不同的配置上。
+# 实测（2026-10-31）拿纯浏览器 UA 去请求，原神（gid=2）返回的工具列表
+# 整个是空的 —— 不是"没配直播兑换码"，是连「大地图」「观测枢」都不给，
+# 像是这个版区在网页端压根没接这套导航。换成米游社 App 的 UA 加上
+# x-rpc-client_type / x-rpc-app_version 之后，10 项工具全出来了。
+# 星铁两种头都能拿到，绝区零 App 头下还多出「攻略合集」「工具箱」几项。
+# 所以先走 App 头；万一列表为空，再用网页头补一次。
+_NAV_HEADERS = (
+    {
+        "User-Agent": "Miyoushe/2.60.0 (Linux; Android 13) Mobile",
+        "x-rpc-client_type": "2",
+        "x-rpc-app_version": "2.60.0",
+        "x-rpc-app_id": "bll8iq97cem8",
+        "Referer": "https://www.miyoushe.com/",
+        "Origin": "https://www.miyoushe.com",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    },
+    {
+        **HEADERS,
+        "Content-Type": "application/json",
+        "Referer": "https://www.miyoushe.com/",
+    },
+)
+
+
+def _nav_groups(gid: int, headers: dict) -> list[dict]:
+    """要一次版区工具列表，按分组返回。"""
+    body = json.dumps({"game_id": gid, "types": [NAV_PC_TYPE]}).encode()
+    req = urllib.request.Request(NAV_API, data=body, headers=headers)
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+    if data.get("retcode") != 0:
+        raise MiyoError(str(data.get("message") or data.get("retcode")))
+    return (data.get("data") or {}).get("list") or []
 
 
 def fetch_nav_act_id(game: str) -> dict | None:
@@ -554,21 +625,12 @@ def fetch_nav_act_id(game: str) -> dict | None:
     gid = GAME_GIDS.get(game)
     if not gid:
         return None
-    body = json.dumps({"game_id": gid, "types": [NAV_PC_TYPE]}).encode()
-    req = urllib.request.Request(
-        NAV_API,
-        data=body,
-        headers={
-            **HEADERS,
-            "Content-Type": "application/json",
-            "Referer": "https://www.miyoushe.com/",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=12) as resp:
-        data = json.loads(resp.read().decode("utf-8", "replace"))
-    if data.get("retcode") != 0:
-        raise MiyoError(str(data.get("message") or data.get("retcode")))
-    for group in (data.get("data") or {}).get("list") or []:
+    groups: list[dict] = []
+    for headers in _NAV_HEADERS:
+        groups = _nav_groups(gid, headers)
+        if groups:
+            break
+    for group in groups:
         for nav in group.get("navigators") or []:
             name = str(nav.get("name") or "")
             path = str(nav.get("web_path") or nav.get("app_path") or "")
