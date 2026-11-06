@@ -43,11 +43,6 @@
     "type": "int",
     "default": 1800
   },
-  "active_hours": {
-    "description": "没有预告时的高频轮询时段，如 17:00-23:59。有预告则按预告时间前后自动提速",
-    "type": "string",
-    "default": "17:00-23:59"
-  },
   "post_delay_min": {
     "description": "直播结束后再等几分钟才发（码常在结束前后才刷齐，太早发会缺码）。默认 30。0 = 一到结束就发",
     "type": "int",

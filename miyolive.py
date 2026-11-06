@@ -895,14 +895,20 @@ def fetch_version_span(
         end_ts = float(latest["end_ts"])
         cur_ver = str(version_hint or "")
         start_ts = 0.0
-        # 起点三选一：
+        # 起点四选一，按可信程度排：
         #   ① 前瞻帖公布的本版上线日（只有版本号对得上才可信）
         #   ② 上一版的结束日——它正好是这一版的开始日，公告自己就能给出
-        #   ③ 上次算出来的
+        #   ③ 这一版公告的发布时间（「X.Y版本更新说明」就是在 X.Y 上线当天发的）
+        #   ④ 上次算出来的
+        # ② 比 ③ 可信：同一版本下取的是「结束最晚」那条公告，它未必是更新说明
+        # （星铁 4.7 取到的是「4.7版本商店上新」，那是前瞻当晚发的，不是上线日）。
+        # 所以 ③ 只在公告里只有一个版本时才用——原神、绝区零常见这种情况。
         if start_hint and (not cur_ver or cur_ver == latest["version"]):
             start_ts = float(start_hint)
         elif len(spans) >= 2:
             start_ts = float(spans[-2]["end_ts"])
+        elif latest.get("start_ts"):
+            start_ts = float(latest["start_ts"])
         elif cached and cached.get("start_ts"):
             start_ts = float(cached["start_ts"])
 
@@ -1092,6 +1098,7 @@ def fetch_ann_spans(game: str, now: float | None = None) -> list[dict]:
     # 只留「还没过期、又不会远得离谱」的；长期公告的结束年在 2035/2036
     horizon = now + 180 * 86400
     best: dict[str, tuple[float, str, str]] = {}
+    starts: dict[str, float] = {}
     for group in (data.get("data") or {}).get("list") or []:
         for item in group.get("list") or []:
             title = strip_tags(str(item.get("title") or ""))
@@ -1107,12 +1114,16 @@ def fetch_ann_spans(game: str, now: float | None = None) -> list[dict]:
             old = best.get(ver)
             if not old or end_ts > old[0]:
                 best[ver] = (end_ts, title, str(item.get("ann_id") or ""))
+                starts[ver] = _ann_ts(item.get("start_time"))
 
     spans = [
         {
             "version": ver,
             "end_ts": ts,
             "end_text": time.strftime("%m-%d", time.localtime(ts)),
+            # 这条公告自己的发布时间。对「X.Y版本更新说明」来说，它就是 X.Y 上线那天，
+            # 所以哪怕公告里只有一个版本（原神、绝区零常见），也能算出这一版从哪天开始。
+            "start_ts": starts.get(ver) or 0.0,
             "title": title,
             "ann_id": ann_id,
         }
